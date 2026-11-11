@@ -1,0 +1,38 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# CMake / Ninja artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+.ninja_deps
+.ninja_log
+build.ninja
+install_manifest.txt
+
+# Compiled binaries and objects
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# Generated snapshots / test outputs
+*.ppm
+
+# IDE / Editor files
+.vscode/
+.vs/
+.idea/
+*.user
+*.suo
