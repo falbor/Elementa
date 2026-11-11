@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Checkout nightly branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
 
@@ -104,7 +104,7 @@ jobs:
 
     steps:
       - name: Checkout nightly branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
 
@@ -133,7 +133,7 @@ jobs:
 
     steps:
       - name: Checkout nightly branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
 
