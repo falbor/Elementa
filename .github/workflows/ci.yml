@@ -1,0 +1,204 @@
+name: CI - Build & Test
+
+on:
+  push:
+    branches: [main, nightly, stable]
+  pull_request:
+    branches: [main, nightly, stable]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-msvc:
+    name: Windows MSVC (${{ matrix.build_type }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build_type: Release
+            preset: win-msvc-release
+          - build_type: Debug
+            preset: win-msvc-debug
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure CMake (${{ matrix.preset }})
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build all targets
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Run CTest unit tests
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: CLI smoke tests (benchmark & PPM dump)
+        run: |
+          $exe = "build/${{ matrix.preset }}/pixel_sim.exe"
+          & $exe --help
+          & $exe --benchmark 25
+          & $exe --width 160 --height 90 --preset volcano --view thermal --dump-ppm 15 build/${{ matrix.preset }}/smoke.ppm
+          if (-not (Test-Path "build/${{ matrix.preset }}/smoke.ppm") -or (Get-Item "build/${{ matrix.preset }}/smoke.ppm").Length -eq 0) {
+            throw "smoke.ppm was not generated or is empty"
+          }
+
+      - name: Upload Windows MSVC binary
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: elementa-windows-msvc-${{ matrix.build_type }}
+          path: |
+            build/${{ matrix.preset }}/pixel_sim.exe
+            build/${{ matrix.preset }}/pixel_sim_tests.exe
+          retention-days: 7
+
+  windows-mingw:
+    name: Windows MSYS2 UCRT64 (${{ matrix.compiler }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: clang++
+            name: clang
+          - compiler: g++
+            name: gcc
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 UCRT64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Configure, build and test (${{ matrix.compiler }})
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          BUILD_DIR="build/win-mingw-${{ matrix.name }}"
+          cmake -B "${BUILD_DIR}" -G Ninja \
+            -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build "${BUILD_DIR}"
+          ctest --test-dir "${BUILD_DIR}" --output-on-failure
+          "./${BUILD_DIR}/pixel_sim.exe" --help
+          "./${BUILD_DIR}/pixel_sim.exe" --benchmark 25
+          "./${BUILD_DIR}/pixel_sim.exe" --width 160 --height 90 --preset lab --dump-ppm 10 "${BUILD_DIR}/smoke.ppm"
+          test -s "${BUILD_DIR}/smoke.ppm"
+
+      - name: Upload static MinGW binary
+        if: matrix.name == 'clang'
+        uses: actions/upload-artifact@v4
+        with:
+          name: elementa-windows-mingw-clang-static
+          path: |
+            build/win-mingw-${{ matrix.name }}/pixel_sim.exe
+            build/win-mingw-${{ matrix.name }}/pixel_sim_tests.exe
+          retention-days: 7
+
+  unix-build:
+    name: ${{ matrix.os_label }} (${{ matrix.compiler }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_label: Ubuntu
+            compiler: g++
+            preset: linux-gcc-release
+          - runner: ubuntu-latest
+            os_label: Ubuntu
+            compiler: clang++
+            preset: linux-clang-release
+          - runner: macos-latest
+            os_label: macOS
+            compiler: clang++
+            preset: macos-clang-release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure build tools on Linux
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1 || ! command -v "${{ matrix.compiler }}" >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build clang g++
+          fi
+
+      - name: Ensure Ninja on macOS
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+
+      - name: Configure CMake (${{ matrix.preset }})
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build all targets
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Run CTest unit tests
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: CLI smoke tests (headless mode)
+        run: |
+          ./build/${{ matrix.preset }}/pixel_sim --help
+          ./build/${{ matrix.preset }}/pixel_sim --benchmark 20
+          ./build/${{ matrix.preset }}/pixel_sim --width 160 --height 90 --preset hydro --dump-ppm 10 build/${{ matrix.preset }}/smoke.ppm
+          test -s "build/${{ matrix.preset }}/smoke.ppm"
+
+  sanitizers:
+    name: Ubuntu Clang Sanitizers (ASan + UBSan)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Clang and Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1 || ! command -v clang++ >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build clang
+          fi
+
+      - name: Configure CMake (linux-asan-ubsan)
+        run: cmake --preset linux-asan-ubsan
+
+      - name: Build with ASan + UBSan
+        run: cmake --build --preset linux-asan-ubsan
+
+      - name: Run CTest under ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --preset linux-asan-ubsan
+
+      - name: Run headless CLI smoke test under ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          ./build/linux-asan-ubsan/pixel_sim --benchmark 15
+          ./build/linux-asan-ubsan/pixel_sim --width 128 --height 72 --preset explosives --dump-ppm 10 build/linux-asan-ubsan/smoke.ppm
+          test -s build/linux-asan-ubsan/smoke.ppm

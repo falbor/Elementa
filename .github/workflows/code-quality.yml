@@ -1,0 +1,127 @@
+name: Code Quality & Static Analysis
+
+on:
+  push:
+    branches: [main, nightly, stable]
+  pull_request:
+    branches: [main, nightly, stable]
+  workflow_dispatch:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cmake-presets-check:
+    name: Validate CMakePresets (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: List available CMake presets
+        run: cmake --list-presets=all
+
+  strict-warnings:
+    name: Strict Warnings Check (-Werror)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Clang and Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1 || ! command -v clang++ >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build clang
+          fi
+
+      - name: Configure and build with -Werror
+        run: |
+          cmake -B build/strict-clang -G Ninja \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DELEMENTA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/strict-clang
+          ctest --test-dir build/strict-clang --output-on-failure
+
+  cppcheck:
+    name: Cppcheck Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck on C++20 sources
+        run: |
+          set -o pipefail
+          cppcheck \
+            --std=c++20 \
+            --language=c++ \
+            --enable=warning,performance,portability \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            -I include \
+            include src/engine src/app/main.cpp tests \
+            2> cppcheck-report.txt || true
+
+          echo "## Cppcheck Static Analysis" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s cppcheck-report.txt ]; then
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            head -n 120 cppcheck-report.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No warnings reported by cppcheck." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Fail only on hard cppcheck errors
+          cppcheck \
+            --std=c++20 \
+            --language=c++ \
+            --error-exitcode=1 \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            -I include \
+            include src/engine src/app/main.cpp tests
+
+  clang-format-audit:
+    name: Formatting Audit (clang-format)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Audit formatting against .clang-format
+        run: |
+          FILES=$(find include src tests -type f \( -name '*.hpp' -o -name '*.cpp' \) | sort)
+          DRIFT=0
+          echo "## clang-format Audit" >> "$GITHUB_STEP_SUMMARY"
+          for f in $FILES; do
+            if ! clang-format --dry-run --Werror "$f" >/dev/null 2>&1; then
+              echo "- Needs formatting: \`$f\`" >> "$GITHUB_STEP_SUMMARY"
+              DRIFT=$((DRIFT + 1))
+            fi
+          done
+          if [ "$DRIFT" -eq 0 ]; then
+            echo "All checked C++ files match \`.clang-format\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Total files with formatting differences: **$DRIFT** (advisory check)." >> "$GITHUB_STEP_SUMMARY"
+          fi

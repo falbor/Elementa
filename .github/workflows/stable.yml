@@ -1,0 +1,287 @@
+name: Stable Build & Release
+
+on:
+  push:
+    branches: [stable]
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional version tag (e.g. v1.0.0). Leave empty to update stable-latest."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Prepare Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      target_sha: ${{ steps.meta.outputs.target_sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      is_rolling: ${{ steps.meta.outputs.is_rolling }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute release version and tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.release_tag || '' }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+            TAG="${GITHUB_REF_NAME}"
+            ROLLING="false"
+          elif [ -n "${INPUT_TAG}" ]; then
+            VERSION="${INPUT_TAG}"
+            TAG="${INPUT_TAG}"
+            ROLLING="false"
+          else
+            VERSION="stable-${SHORT_SHA}"
+            TAG="stable-latest"
+            ROLLING="true"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "target_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "is_rolling=${ROLLING}" >> "$GITHUB_OUTPUT"
+
+  build-windows-mingw:
+    name: Stable Windows x64 (MinGW Static)
+    needs: prepare
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 UCRT64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Configure, build, test and stage install
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cmake -B build/stable-mingw -G Ninja \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DELEMENTA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/stable-mingw
+          ctest --test-dir build/stable-mingw --output-on-failure
+          ./build/stable-mingw/pixel_sim.exe --benchmark 30
+          cmake --install build/stable-mingw --prefix dist/windows-mingw
+
+      - name: Package archive
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path packages | Out-Null
+          Compress-Archive -Path dist/windows-mingw/* -DestinationPath "packages/Elementa-$env:VERSION-windows-x64-mingw-static.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-windows-mingw
+          path: packages/*.zip
+          retention-days: 90
+
+  build-windows-msvc:
+    name: Stable Windows x64 (MSVC)
+    needs: prepare
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure, build, test and package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cmake --preset win-msvc-release
+          cmake --build --preset win-msvc-release
+          ctest --preset win-msvc-release
+          .\build\win-msvc-release\pixel_sim.exe --benchmark 30
+          cmake --install build/win-msvc-release --prefix dist/windows-msvc
+          New-Item -ItemType Directory -Force -Path packages | Out-Null
+          Compress-Archive -Path dist/windows-msvc/* -DestinationPath "packages/Elementa-$env:VERSION-windows-x64-msvc.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-windows-msvc
+          path: packages/*.zip
+          retention-days: 90
+
+  build-unix:
+    name: Stable ${{ matrix.os_label }} (Headless)
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_label: Linux x64
+            pkg_os: linux-x64
+            preset: linux-gcc-release
+          - runner: macos-latest
+            os_label: macOS arm64
+            pkg_os: macos-arm64
+            preset: macos-clang-release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Ninja on Linux
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build
+          fi
+
+      - name: Ensure Ninja on macOS
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+
+      - name: Configure, build, test and package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
+          ctest --preset ${{ matrix.preset }}
+          ./build/${{ matrix.preset }}/pixel_sim --benchmark 30
+          cmake --install "build/${{ matrix.preset }}" --prefix "dist/${{ matrix.pkg_os }}"
+          mkdir -p packages
+          tar -C "dist/${{ matrix.pkg_os }}" -czf "packages/Elementa-${VERSION}-${{ matrix.pkg_os }}-headless.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-${{ matrix.pkg_os }}
+          path: packages/*.tar.gz
+          retention-days: 90
+
+  verify-sanitizers:
+    name: Stable Verification (Linux ASan + UBSan)
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Clang and Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1 || ! command -v clang++ >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build clang
+          fi
+
+      - name: Run unit tests under ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cmake --preset linux-asan-ubsan
+          cmake --build --preset linux-asan-ubsan
+          ctest --preset linux-asan-ubsan
+
+  publish-release:
+    name: Publish Stable GitHub Release
+    needs: [prepare, build-windows-mingw, build-windows-msvc, build-unix, verify-sanitizers]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Generate checksums and release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          cd release-files
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          cat > ../release-notes.md <<EOF
+          **Elementa** Stable Release \`${VERSION}\` (commit \`${TARGET_SHA}\`, ${BUILD_DATE}).
+
+          ### Included Packages
+          - \`Elementa-${VERSION}-windows-x64-mingw-static.zip\`: Standalone Windows x64 GUI + CLI executable (static LLVM-MinGW Clang)
+          - \`Elementa-${VERSION}-windows-x64-msvc.zip\`: Windows x64 GUI + CLI executable (MSVC)
+          - \`Elementa-${VERSION}-linux-x64-headless.tar.gz\`: Linux x64 headless CLI + unit tests
+          - \`Elementa-${VERSION}-macos-arm64-headless.tar.gz\`: macOS arm64 headless CLI + unit tests
+
+          ### SHA-256 Checksums
+          \`\`\`text
+          $(cat SHA256SUMS.txt)
+          \`\`\`
+          EOF
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
+          IS_ROLLING: ${{ needs.prepare.outputs.is_rolling }}
+          REF_TYPE: ${{ github.ref_type }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${IS_ROLLING}" = "true" ]; then
+            gh release delete "${RELEASE_TAG}" --yes >/dev/null 2>&1 || true
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" >/dev/null 2>&1 || true
+          fi
+          if [ "${REF_TYPE}" = "tag" ]; then
+            gh release create "${RELEASE_TAG}" release-files/* \
+              --verify-tag \
+              --latest \
+              --title "Elementa ${VERSION}" \
+              --notes-file release-notes.md
+          else
+            gh release create "${RELEASE_TAG}" release-files/* \
+              --target "${TARGET_SHA}" \
+              --latest \
+              --title "Elementa ${VERSION}" \
+              --notes-file release-notes.md
+          fi

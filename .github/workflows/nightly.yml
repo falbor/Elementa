@@ -1,0 +1,224 @@
+name: Nightly Build & Pre-Release
+
+on:
+  push:
+    branches: [nightly]
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      benchmark_ticks:
+        description: "Number of ticks per preset benchmark"
+        required: false
+        default: "60"
+        type: string
+      publish_release:
+        description: "Publish/update nightly-latest GitHub pre-release"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-mingw:
+    name: Nightly Windows x64 (MinGW Static)
+    runs-on: windows-latest
+    outputs:
+      target_sha: ${{ steps.meta.outputs.sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+
+    steps:
+      - name: Checkout nightly branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+
+      - name: Capture target commit metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          $short = (git rev-parse --short HEAD).Trim()
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "short_sha=$short" >> $env:GITHUB_OUTPUT
+
+      - name: Setup MSYS2 UCRT64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Configure, build, test and benchmark all presets
+        shell: msys2 {0}
+        env:
+          BENCH_TICKS: ${{ inputs.benchmark_ticks || '60' }}
+        run: |
+          set -euo pipefail
+          cmake -B build/nightly-mingw -G Ninja \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DELEMENTA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/nightly-mingw
+          ctest --test-dir build/nightly-mingw --output-on-failure
+
+          echo "## Nightly Benchmark Summary (${{ steps.meta.outputs.short_sha }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          for preset in lab volcano hydro explosives electric zerog; do
+            echo "=== Preset: $preset ===" >> "$GITHUB_STEP_SUMMARY"
+            ./build/nightly-mingw/pixel_sim.exe --preset "$preset" --benchmark "$BENCH_TICKS" >> "$GITHUB_STEP_SUMMARY"
+            ./build/nightly-mingw/pixel_sim.exe --width 240 --height 135 --preset "$preset" --dump-ppm 20 "build/nightly-mingw/${preset}.ppm"
+            test -s "build/nightly-mingw/${preset}.ppm"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          cmake --install build/nightly-mingw --prefix dist/windows-mingw
+
+      - name: Package Windows MinGW static archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path packages | Out-Null
+          Compress-Archive -Path dist/windows-mingw/* -DestinationPath packages/Elementa-nightly-windows-x64-mingw-static.zip -Force
+
+      - name: Upload Windows MinGW package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-windows-mingw
+          path: packages/Elementa-nightly-windows-x64-mingw-static.zip
+          retention-days: 14
+
+  build-windows-msvc:
+    name: Nightly Windows x64 (MSVC)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout nightly branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure, build, test and stage install
+        run: |
+          cmake --preset win-msvc-release
+          cmake --build --preset win-msvc-release
+          ctest --preset win-msvc-release
+          cmake --install build/win-msvc-release --prefix dist/windows-msvc
+          New-Item -ItemType Directory -Force -Path packages | Out-Null
+          Compress-Archive -Path dist/windows-msvc/* -DestinationPath packages/Elementa-nightly-windows-x64-msvc.zip -Force
+
+      - name: Upload Windows MSVC package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-windows-msvc
+          path: packages/Elementa-nightly-windows-x64-msvc.zip
+          retention-days: 14
+
+  build-linux:
+    name: Nightly Linux x64 (Headless + ASan/UBSan)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout nightly branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+
+      - name: Ensure build tools
+        run: |
+          if ! command -v ninja >/dev/null 2>&1 || ! command -v clang++ >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build clang g++
+          fi
+
+      - name: Run ASan + UBSan verification
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cmake --preset linux-asan-ubsan
+          cmake --build --preset linux-asan-ubsan
+          ctest --preset linux-asan-ubsan
+
+      - name: Build Linux Release and package
+        run: |
+          cmake --preset linux-gcc-release
+          cmake --build --preset linux-gcc-release
+          ctest --preset linux-gcc-release
+          cmake --install build/linux-gcc-release --prefix dist/linux-x64-headless
+          mkdir -p packages
+          tar -C dist/linux-x64-headless -czf packages/Elementa-nightly-linux-x64-headless.tar.gz .
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-linux-headless
+          path: packages/Elementa-nightly-linux-x64-headless.tar.gz
+          retention-days: 14
+
+  publish-nightly:
+    name: Publish Nightly Pre-Release
+    needs: [build-windows-mingw, build-windows-msvc, build-linux]
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.publish_release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Generate checksums and release notes
+        env:
+          TARGET_SHA: ${{ needs.build-windows-mingw.outputs.target_sha }}
+          SHORT_SHA: ${{ needs.build-windows-mingw.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          cd release-files
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          cat > ../release-notes.md <<EOF
+          Automated **Nightly** build from branch \`nightly\` at commit \`${TARGET_SHA}\` (${BUILD_DATE}).
+
+          ### Included Packages
+          - \`Elementa-nightly-windows-x64-mingw-static.zip\`: Standalone Windows x64 GUI + CLI executable (static LLVM-MinGW Clang build)
+          - \`Elementa-nightly-windows-x64-msvc.zip\`: Windows x64 GUI + CLI executable (MSVC build)
+          - \`Elementa-nightly-linux-x64-headless.tar.gz\`: Linux x64 headless CLI (\`--benchmark\`, \`--dump-ppm\`) + unit tests
+
+          ### SHA-256 Checksums
+          \`\`\`text
+          $(cat SHA256SUMS.txt)
+          \`\`\`
+          EOF
+
+      - name: Publish rolling nightly-latest pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ needs.build-windows-mingw.outputs.target_sha }}
+          SHORT_SHA: ${{ needs.build-windows-mingw.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          gh release delete nightly-latest --yes >/dev/null 2>&1 || true
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly-latest" >/dev/null 2>&1 || true
+          BUILD_DAY=$(date -u +"%Y-%m-%d")
+          gh release create nightly-latest release-files/* \
+            --target "${TARGET_SHA}" \
+            --prerelease \
+            --title "Elementa Nightly (${BUILD_DAY} / ${SHORT_SHA})" \
+            --notes-file release-notes.md

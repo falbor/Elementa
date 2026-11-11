@@ -1,4 +1,6 @@
+#ifdef _WIN32
 #include "Win32App.hpp"
+#endif
 #include "sim/SimWorld.hpp"
 
 #include <algorithm>
@@ -130,10 +132,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+#ifdef _WIN32
     sim::app::Win32App app(world, view, preset);
     if (!app.create(1280, 780)) {
         std::cerr << "Impossibile inizializzare la finestra Win32.\n";
         return 1;
     }
     return app.run();
+#else
+    std::cerr << "Modalita' GUI disponibile solo su Windows; usa --benchmark o --dump-ppm.\n";
+    printUsage();
+    return 1;
+#endif
 }
