@@ -1,0 +1,93 @@
+name: Sync Nightly from Main
+
+on:
+  workflow_run:
+    workflows:
+      - "CI - Build & Test"
+      - "Code Quality & Static Analysis"
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Trigger nightly build even if nightly is already at main HEAD"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-nightly
+  cancel-in-progress: false
+
+jobs:
+  promote-nightly:
+    name: Align nightly to verified main and trigger build
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Align nightly branch and trigger nightly workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || false }}
+        run: |
+          set -euo pipefail
+
+          MAIN_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
+          if [ "${EVENT_NAME}" = "workflow_run" ]; then
+            TARGET_SHA="${RUN_HEAD_SHA}"
+            if [ "${TARGET_SHA}" != "${MAIN_SHA}" ]; then
+              echo "Commit ${TARGET_SHA} is superseded by main tip ${MAIN_SHA}; skipping."
+              exit 0
+            fi
+          else
+            TARGET_SHA="${MAIN_SHA}"
+          fi
+
+          RUNS_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${TARGET_SHA}&per_page=50")
+          CI_STATUS=$(echo "$RUNS_JSON" | jq -r '[.workflow_runs[] | select(.name == "CI - Build & Test" and .head_branch == "main" and .event == "push")] | sort_by(.created_at) | last | if . == null then "missing" else "\(.status):\(.conclusion)" end')
+          QUAL_STATUS=$(echo "$RUNS_JSON" | jq -r '[.workflow_runs[] | select(.name == "Code Quality & Static Analysis" and .head_branch == "main" and .event == "push")] | sort_by(.created_at) | last | if . == null then "missing" else "\(.status):\(.conclusion)" end')
+
+          echo "Target commit: ${TARGET_SHA}"
+          echo "CI - Build & Test: ${CI_STATUS}"
+          echo "Code Quality & Static Analysis: ${QUAL_STATUS}"
+
+          if [ "${CI_STATUS}" != "completed:success" ] || [ "${QUAL_STATUS}" != "completed:success" ]; then
+            echo "Required main workflows have not both succeeded yet; waiting."
+            exit 0
+          fi
+
+          NIGHTLY_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/nightly" --jq '.object.sha' 2>/dev/null || echo "")
+          if [ "${NIGHTLY_SHA}" = "${TARGET_SHA}" ] && [ "${FORCE_REBUILD}" != "true" ]; then
+            echo "Branch nightly is already aligned with main (${TARGET_SHA})."
+            exit 0
+          fi
+
+          if [ "${NIGHTLY_SHA}" != "${TARGET_SHA}" ]; then
+            if [ -n "${NIGHTLY_SHA}" ]; then
+              gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/nightly" \
+                --method PATCH \
+                -f sha="${TARGET_SHA}" \
+                -F force=false
+            else
+              gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+                --method POST \
+                -f ref="refs/heads/nightly" \
+                -f sha="${TARGET_SHA}"
+            fi
+            echo "Aligned nightly (${NIGHTLY_SHA:-none} -> ${TARGET_SHA})."
+          fi
+
+          gh workflow run nightly.yml --ref nightly -f publish_release=true
+          echo "Dispatched Nightly Build & Pre-Release on nightly (${TARGET_SHA})."
