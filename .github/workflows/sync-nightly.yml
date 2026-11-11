@@ -89,5 +89,5 @@ jobs:
             echo "Aligned nightly (${NIGHTLY_SHA:-none} -> ${TARGET_SHA})."
           fi
 
-          gh workflow run nightly.yml --ref nightly -f publish_release=true
+          gh workflow run nightly.yml -R "${GITHUB_REPOSITORY}" --ref nightly -f publish_release=true
           echo "Dispatched Nightly Build & Pre-Release on nightly (${TARGET_SHA})."
