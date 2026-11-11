@@ -98,8 +98,23 @@ public:
     // Render all W*H pixels into internal BGRA8888 buffer (0xAARRGGBB little-endian BGRA)
     void render(ViewMode mode);
 
-    const uint32_t* framebuffer() const noexcept { return m_framebuffer.data(); }
-    const SimStats& stats() const noexcept { return m_stats; }
+    const uint32_t *framebuffer() const noexcept { return m_framebuffer.data(); }
+    const SimStats &stats() const noexcept { return m_stats; }
+
+    // Read-only raw field accessors for external renderers (zero-copy SOA access)
+    const uint8_t *materialData() const noexcept { return m_mat.data(); }
+    const uint8_t *colorSeedData() const noexcept { return m_colorSeed.data(); }
+    const float *tempData() const noexcept { return m_tempK.data(); }
+    const float *lifeData() const noexcept { return m_life.data(); }
+    const float *chargeData() const noexcept { return m_charge.data(); }
+    const float *pressureData() const noexcept { return m_pressure.data(); }
+    const float *velocityXData() const noexcept { return m_vx.data(); }
+    const float *velocityYData() const noexcept { return m_vy.data(); }
+    const float *airVelocityXData() const noexcept { return m_airVx.data(); }
+    const float *airVelocityYData() const noexcept { return m_airVy.data(); }
+    const float *lightRData() const noexcept { return m_lightR.data(); }
+    const float *lightGData() const noexcept { return m_lightG.data(); }
+    const float *lightBData() const noexcept { return m_lightB.data(); }
 
     // Configuration
     void setGravityMode(GravityMode mode) noexcept { m_gravityMode = mode; }
@@ -131,9 +146,7 @@ public:
     void detonate(int cx, int cy, int radius, float blastStrength, float peakTempK);
 
     // Inspection & counts
-    bool inBounds(int x, int y) const noexcept {
-        return x >= 0 && x < m_width && y >= 0 && y < m_height;
-    }
+    bool inBounds(int x, int y) const noexcept { return x >= 0 && x < m_width && y >= 0 && y < m_height; }
 
     int index(int x, int y) const noexcept { return y * m_width + x; }
 
@@ -142,7 +155,7 @@ public:
     double computeTotalThermalEnergy() const noexcept;
 
     // Export current rendered framebuffer as binary PPM (P6)
-    bool savePPM(const std::string& path, ViewMode mode = ViewMode::Physical);
+    bool savePPM(const std::string &path, ViewMode mode = ViewMode::Physical);
 
 private:
     // Simulation sub-passes (every pixel computed)
@@ -159,7 +172,7 @@ private:
     void moveParticle(int srcIdx, int dstIdx) noexcept;
     void swapParticles(int aIdx, int bIdx) noexcept;
     void convertCell(int idx, MaterialId newMat, bool keepTemp = true) noexcept;
-    void computeGravityAt(int x, int y, float& gx, float& gy) const noexcept;
+    void computeGravityAt(int x, int y, float &gx, float &gy) const noexcept;
 
     // Fast deterministic PRNG
     uint32_t nextRand() noexcept;

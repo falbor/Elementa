@@ -32,20 +32,17 @@ public:
             ++m_epoch;
         }
         m_cvStart.notify_all();
-        for (auto& t : m_workers) {
+        for (auto &t : m_workers) {
             if (t.joinable()) t.join();
         }
     }
 
-    ThreadPool(const ThreadPool&) = delete;
-    ThreadPool& operator=(const ThreadPool&) = delete;
+    ThreadPool(const ThreadPool &) = delete;
+    ThreadPool &operator=(const ThreadPool &) = delete;
 
-    unsigned totalThreads() const noexcept {
-        return static_cast<unsigned>(m_workers.size()) + 1u;
-    }
+    unsigned totalThreads() const noexcept { return static_cast<unsigned>(m_workers.size()) + 1u; }
 
-    template <typename Fn>
-    void parallelFor(int begin, int end, Fn&& fn) {
+    template <typename Fn> void parallelFor(int begin, int end, Fn &&fn) {
         const int count = end - begin;
         if (count <= 0) return;
 
@@ -80,15 +77,12 @@ public:
         }
 
         std::unique_lock<std::mutex> lock(m_mutex);
-        m_cvDone.wait(lock, [this]() {
-            return m_activeWorkers.load(std::memory_order_acquire) == 0;
-        });
+        m_cvDone.wait(lock, [this]() { return m_activeWorkers.load(std::memory_order_acquire) == 0; });
         m_task = nullptr;
     }
 
 private:
-    template <typename Fn>
-    static void executeChunk(int chunkIdx, int begin, int end, int chunks, Fn&& fn) {
+    template <typename Fn> static void executeChunk(int chunkIdx, int begin, int end, int chunks, Fn &&fn) {
         const int count = end - begin;
         const int start = begin + (chunkIdx * count) / chunks;
         const int stop = begin + ((chunkIdx + 1) * count) / chunks;
@@ -100,16 +94,14 @@ private:
     void workerLoop() {
         uint64_t seenEpoch = 0;
         while (true) {
-            std::function<void(int, int)>* taskPtr = nullptr;
+            std::function<void(int, int)> *taskPtr = nullptr;
             int begin = 0;
             int end = 0;
             int chunks = 0;
 
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                m_cvStart.wait(lock, [this, seenEpoch]() {
-                    return m_stop || m_epoch != seenEpoch;
-                });
+                m_cvStart.wait(lock, [this, seenEpoch]() { return m_stop || m_epoch != seenEpoch; });
                 if (m_stop) return;
                 seenEpoch = m_epoch;
                 taskPtr = m_task;
@@ -138,7 +130,7 @@ private:
     std::condition_variable m_cvStart;
     std::condition_variable m_cvDone;
 
-    std::function<void(int, int)>* m_task = nullptr;
+    std::function<void(int, int)> *m_task = nullptr;
     int m_begin = 0;
     int m_end = 0;
     int m_chunks = 0;

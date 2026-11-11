@@ -87,6 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           cmake -B build/stable-mingw -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_BUILD_TYPE=Release \
             -DELEMENTA_WARNINGS_AS_ERRORS=ON
@@ -142,7 +143,7 @@ jobs:
           retention-days: 90
 
   build-unix:
-    name: Stable ${{ matrix.os_label }} (Headless)
+    name: Stable ${{ matrix.os_label }} (GUI + CLI)
     needs: prepare
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -162,13 +163,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Ninja on Linux
+      - name: Ensure build tools and SDL3/OpenGL dependencies on Linux
         if: runner.os == 'Linux'
         run: |
-          if ! command -v ninja >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ninja-build
-          fi
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build g++ pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+            libxkbcommon-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libwayland-dev libdecor-0-dev libdbus-1-dev
 
       - name: Ensure Ninja on macOS
         if: runner.os == 'macOS'
@@ -187,7 +191,7 @@ jobs:
           ./build/${{ matrix.preset }}/pixel_sim --benchmark 30
           cmake --install "build/${{ matrix.preset }}" --prefix "dist/${{ matrix.pkg_os }}"
           mkdir -p packages
-          tar -C "dist/${{ matrix.pkg_os }}" -czf "packages/Elementa-${VERSION}-${{ matrix.pkg_os }}-headless.tar.gz" .
+          tar -C "dist/${{ matrix.pkg_os }}" -czf "packages/Elementa-${VERSION}-${{ matrix.pkg_os }}.tar.gz" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -205,12 +209,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Clang and Ninja
+      - name: Ensure Clang, Ninja and SDL3/OpenGL dependencies
         run: |
-          if ! command -v ninja >/dev/null 2>&1 || ! command -v clang++ >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ninja-build clang
-          fi
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build clang pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+            libxkbcommon-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libwayland-dev libdecor-0-dev libdbus-1-dev
 
       - name: Run unit tests under ASan + UBSan
         env:
@@ -249,8 +256,8 @@ jobs:
           ### Included Packages
           - \`Elementa-${VERSION}-windows-x64-mingw-static.zip\`: Standalone Windows x64 GUI + CLI executable (static LLVM-MinGW Clang)
           - \`Elementa-${VERSION}-windows-x64-msvc.zip\`: Windows x64 GUI + CLI executable (MSVC)
-          - \`Elementa-${VERSION}-linux-x64-headless.tar.gz\`: Linux x64 headless CLI + unit tests
-          - \`Elementa-${VERSION}-macos-arm64-headless.tar.gz\`: macOS arm64 headless CLI + unit tests
+          - \`Elementa-${VERSION}-linux-x64.tar.gz\`: Linux x64 GUI + CLI + unit tests
+          - \`Elementa-${VERSION}-macos-arm64.tar.gz\`: macOS arm64 GUI + CLI + unit tests
 
           ### SHA-256 Checksums
           \`\`\`text

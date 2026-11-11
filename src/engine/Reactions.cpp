@@ -39,12 +39,13 @@ void SimWorld::stepReactions() {
                 const bool erupting = (cycle >= 6ull && cycle < 26ull);
                 const bool simmering = (cycle >= 74ull);
 
-                // Keep magma chamber base superheated and unclogged
+                // Keep magma chamber base superheated and unclogged without bypassing solid barriers
                 for (int dy = 1; dy <= 3; ++dy) {
                     const int ny = y - dy;
                     if (!inBounds(x, ny)) break;
                     const int ni = ny * W + x;
                     const MaterialId nm = fromIdx(m_mat[ni]);
+                    if (nm == MaterialId::Bedrock) break;
                     if (nm == MaterialId::Air || nm == MaterialId::Smoke || nm == MaterialId::Steam ||
                         nm == MaterialId::Fire ||
                         (erupting && (nm == MaterialId::Stone || nm == MaterialId::Obsidian))) {
@@ -56,19 +57,26 @@ void SimWorld::stepReactions() {
                         }
                     } else if (nm == MaterialId::Lava) {
                         m_tempK[ni] = std::max(m_tempK[ni], erupting ? 2050.0f : 1650.0f);
+                    } else if (getMaterial(nm).isSolidObstacle()) {
+                        break;
                     }
                 }
 
                 const int baseUp = (y - 1) * W + x;
+                const MaterialId baseMat = fromIdx(m_mat[baseUp]);
                 if (erupting) {
-                    m_blastDiv[baseUp] += 1.05f;
+                    if (!getMaterial(baseMat).isSolidObstacle()) {
+                        m_blastDiv[baseUp] += 1.05f;
+                    }
                     const int minY = std::max(1, H * 16 / 100);
                     for (int ny = y - 1; ny >= minY; --ny) {
                         const int ni = ny * W + x;
                         const MaterialId nm = fromIdx(m_mat[ni]);
                         const int dy = y - ny;
-                        if (dy > 4 && (nm == MaterialId::Stone || nm == MaterialId::Obsidian ||
-                                       nm == MaterialId::Bedrock)) {
+                        if (nm == MaterialId::Bedrock ||
+                            (dy > 4 && (nm == MaterialId::Stone || nm == MaterialId::Obsidian)) ||
+                            (getMaterial(nm).isSolidObstacle() && nm != MaterialId::Stone &&
+                             nm != MaterialId::Obsidian)) {
                             break;
                         }
                         if (nm == MaterialId::Lava) {
@@ -76,15 +84,18 @@ void SimWorld::stepReactions() {
                             const float pushY = upperVent ? 0.85f : 0.55f;
                             const float spreadX = upperVent ? 0.34f : 0.14f;
                             m_vy[ni] = std::clamp(m_vy[ni] - pushY, -8.5f, 8.5f);
-                            m_vx[ni] = std::clamp(m_vx[ni] + static_cast<float>(static_cast<int>((rnd + static_cast<uint32_t>(dy)) % 3u) - 1) * spreadX,
-                                                  -4.5f, 4.5f);
+                            m_vx[ni] = std::clamp(
+                                m_vx[ni] +
+                                    static_cast<float>(static_cast<int>((rnd + static_cast<uint32_t>(dy)) % 3u) - 1) *
+                                        spreadX,
+                                -4.5f, 4.5f);
                             m_airVy[ni] = std::clamp(m_airVy[ni] - 0.65f, -12.0f, 12.0f);
                             m_blastDiv[ni] += upperVent ? 0.32f : 0.18f;
                             m_tempK[ni] = std::max(m_tempK[ni], 1820.0f);
 
                             // Emit glowing sparks/fire at top of rising magma column
-                            if (ny > 1 && fromIdx(m_mat[ni - W]) == MaterialId::Air &&
-                                !m_solidMask[ni - W] && ((rnd + static_cast<uint32_t>(dy)) % 7u) == 0u) {
+                            if (ny > 1 && fromIdx(m_mat[ni - W]) == MaterialId::Air && !m_solidMask[ni - W] &&
+                                ((rnd + static_cast<uint32_t>(dy)) % 7u) == 0u) {
                                 const int spIdx = ni - W;
                                 convertCell(spIdx, ((rnd & 1u) ? MaterialId::Spark : MaterialId::Fire), false);
                                 m_vx[spIdx] = static_cast<float>(static_cast<int>((rnd >> 3) % 5u) - 2) * 0.65f;
@@ -92,18 +103,18 @@ void SimWorld::stepReactions() {
                                 m_tempK[spIdx] = 2100.0f;
                                 m_solidMask[spIdx] = 1;
                             }
-                        } else if (nm == MaterialId::Air || nm == MaterialId::Fire ||
-                                   nm == MaterialId::Smoke || nm == MaterialId::Steam) {
+                        } else if (nm == MaterialId::Air || nm == MaterialId::Fire || nm == MaterialId::Smoke ||
+                                   nm == MaterialId::Steam) {
                             m_airVy[ni] = std::clamp(m_airVy[ni] - 0.55f, -12.0f, 12.0f);
                         }
                     }
-                } else if (simmering && ((rnd % 6u) == 0u)) {
+                } else if (simmering && ((rnd % 6u) == 0u) && !getMaterial(baseMat).isSolidObstacle()) {
                     m_blastDiv[baseUp] += 0.14f;
                 }
                 continue;
             }
 
-            const auto& props = getMaterial(mat);
+            const auto &props = getMaterial(mat);
             const float T = m_tempK[i];
 
             // --- 1. Energy & Gas Lifecycle ---
@@ -319,9 +330,10 @@ void SimWorld::stepReactions() {
                     const int ny = y + dy4[k];
                     if (!inBounds(nx, ny)) continue;
                     const int ni = ny * W + nx;
+                    if (m_solidMask[ni]) continue;
                     const MaterialId nm = fromIdx(m_mat[ni]);
-                    if (nm == MaterialId::Water || nm == MaterialId::SaltWater ||
-                        nm == MaterialId::Ice || nm == MaterialId::Snow) {
+                    if (nm == MaterialId::Water || nm == MaterialId::SaltWater || nm == MaterialId::Ice ||
+                        nm == MaterialId::Snow) {
                         const bool saltPrecip = (nm == MaterialId::SaltWater) && ((rnd % 7u) == 0u);
                         convertCell(ni, saltPrecip ? MaterialId::Salt : MaterialId::Steam, false);
                         if (!saltPrecip) {
@@ -366,9 +378,8 @@ void SimWorld::stepReactions() {
                         if (!inBounds(nx, ny)) continue;
                         const int ni = ny * W + nx;
                         const MaterialId nm = fromIdx(m_mat[ni]);
-                        if (nm == MaterialId::Fire || nm == MaterialId::Spark ||
-                            nm == MaterialId::Plasma || nm == MaterialId::Lava ||
-                            std::abs(m_charge[ni]) > 0.35f) {
+                        if (nm == MaterialId::Fire || nm == MaterialId::Spark || nm == MaterialId::Plasma ||
+                            nm == MaterialId::Lava || std::abs(m_charge[ni]) > 0.35f) {
                             ignite = true;
                             break;
                         }
@@ -435,14 +446,20 @@ void SimWorld::stepReactions() {
                     const int ny = y + dy4[(k + rnd) & 3];
                     if (!inBounds(nx, ny)) continue;
                     const int ni = ny * W + nx;
+                    if (m_solidMask[ni]) continue;
                     const MaterialId nm = fromIdx(m_mat[ni]);
 
                     uint32_t resist = 0;
-                    if (nm == MaterialId::Plant || nm == MaterialId::Wood || nm == MaterialId::Ice) resist = 4u;
-                    else if (nm == MaterialId::Metal || nm == MaterialId::Stone || nm == MaterialId::Salt) resist = 10u;
-                    else if (nm == MaterialId::Sand) resist = 22u;
-                    else if (nm == MaterialId::Obsidian) resist = 85u;
-                    else continue;
+                    if (nm == MaterialId::Plant || nm == MaterialId::Wood || nm == MaterialId::Ice)
+                        resist = 4u;
+                    else if (nm == MaterialId::Metal || nm == MaterialId::Stone || nm == MaterialId::Salt)
+                        resist = 10u;
+                    else if (nm == MaterialId::Sand)
+                        resist = 22u;
+                    else if (nm == MaterialId::Obsidian)
+                        resist = 85u;
+                    else
+                        continue;
 
                     if ((rnd % resist) == 0u) {
                         MaterialId bubbleGas = MaterialId::Smoke;
@@ -479,6 +496,7 @@ void SimWorld::stepReactions() {
                     const int ny = y + dy4[(k + rnd) & 3];
                     if (!inBounds(nx, ny)) continue;
                     const int ni = ny * W + nx;
+                    if (m_solidMask[ni]) continue;
                     const MaterialId nm = fromIdx(m_mat[ni]);
                     if (nm == MaterialId::Water && (rnd % 5u) == 0u) {
                         convertCell(ni, MaterialId::SaltWater, true);
@@ -514,7 +532,7 @@ void SimWorld::stepReactions() {
                         if (m_life[i] < 6.0f) {
                             m_life[i] = 10.0f;
                             // Sparingly draw water so small pools sustain lush growth
-                            if ((rnd % 8u) == 0u) {
+                            if ((rnd % 8u) == 0u && !m_solidMask[ni]) {
                                 convertCell(ni, MaterialId::Air, true);
                                 m_solidMask[ni] = 1;
                             }

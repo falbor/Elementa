@@ -66,6 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           cmake -B build/nightly-mingw -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_BUILD_TYPE=Release \
             -DELEMENTA_WARNINGS_AS_ERRORS=ON
@@ -128,7 +129,7 @@ jobs:
           retention-days: 14
 
   build-linux:
-    name: Nightly Linux x64 (Headless + ASan/UBSan)
+    name: Nightly Linux x64 (GUI + CLI + ASan/UBSan)
     runs-on: ubuntu-latest
 
     steps:
@@ -137,12 +138,15 @@ jobs:
         with:
           ref: ${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
 
-      - name: Ensure build tools
+      - name: Ensure build tools and SDL3/OpenGL dependencies
         run: |
-          if ! command -v ninja >/dev/null 2>&1 || ! command -v clang++ >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ninja-build clang g++
-          fi
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build clang g++ pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+            libxkbcommon-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libwayland-dev libdecor-0-dev libdbus-1-dev
 
       - name: Run ASan + UBSan verification
         env:
@@ -158,15 +162,15 @@ jobs:
           cmake --preset linux-gcc-release
           cmake --build --preset linux-gcc-release
           ctest --preset linux-gcc-release
-          cmake --install build/linux-gcc-release --prefix dist/linux-x64-headless
+          cmake --install build/linux-gcc-release --prefix dist/linux-x64
           mkdir -p packages
-          tar -C dist/linux-x64-headless -czf packages/Elementa-nightly-linux-x64-headless.tar.gz .
+          tar -C dist/linux-x64 -czf packages/Elementa-nightly-linux-x64.tar.gz .
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-linux-headless
-          path: packages/Elementa-nightly-linux-x64-headless.tar.gz
+          name: nightly-linux-x64
+          path: packages/Elementa-nightly-linux-x64.tar.gz
           retention-days: 14
 
   publish-nightly:
@@ -199,7 +203,7 @@ jobs:
           ### Included Packages
           - \`Elementa-nightly-windows-x64-mingw-static.zip\`: Standalone Windows x64 GUI + CLI executable (static LLVM-MinGW Clang build)
           - \`Elementa-nightly-windows-x64-msvc.zip\`: Windows x64 GUI + CLI executable (MSVC build)
-          - \`Elementa-nightly-linux-x64-headless.tar.gz\`: Linux x64 headless CLI (\`--benchmark\`, \`--dump-ppm\`) + unit tests
+          - \`Elementa-nightly-linux-x64.tar.gz\`: Linux x64 GUI + CLI (\`--benchmark\`, \`--dump-ppm\`) + unit tests
 
           ### SHA-256 Checksums
           \`\`\`text

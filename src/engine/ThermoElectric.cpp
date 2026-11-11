@@ -99,15 +99,15 @@ void SimWorld::stepThermoElectric() {
     const float ambT = m_ambientTempK;
     const bool openBounds = (m_boundaryMode == BoundaryMode::Open);
 
-    const uint8_t* __restrict mat = m_mat.data();
+    const uint8_t *__restrict mat = m_mat.data();
     const uint8_t lavaIdx = toIdx(MaterialId::Lava);
     const uint8_t plasmaIdx = toIdx(MaterialId::Plasma);
     const uint8_t batteryIdx = toIdx(MaterialId::Battery);
 
     // 1. Symmetric energy-conserving Fourier thermal conduction (2 sub-steps for crisp metal conductivity)
     for (int sub = 0; sub < 2; ++sub) {
-        const float* __restrict tempIn = m_tempK.data();
-        float* __restrict tempOut = m_tempTmp.data();
+        const float *__restrict tempIn = m_tempK.data();
+        float *__restrict tempOut = m_tempTmp.data();
         const bool lastSub = (sub == 1);
 
         m_pool.parallelFor(0, H, [&](int y0, int y1) {
@@ -120,7 +120,7 @@ void SimWorld::stepThermoElectric() {
                         const uint8_t mA = safeMatIdx(mat[i]);
                         const float Ta = tempIn[i];
                         const float ca = kHeatCapLUT[mA];
-                        const float* __restrict kRow = kThermalCondLUT[mA].data();
+                        const float *__restrict kRow = kThermalCondLUT[mA].data();
 
                         float netFlux = kRow[safeMatIdx(mat[i - W])] * (tempIn[i - W] - Ta) +
                                         kRow[safeMatIdx(mat[i + W])] * (tempIn[i + W] - Ta);
@@ -140,7 +140,7 @@ void SimWorld::stepThermoElectric() {
                         const uint8_t mA = safeMatIdx(mat[i]);
                         const float Ta = tempIn[i];
                         const float ca = kHeatCapLUT[mA];
-                        const float* __restrict kRow = kThermalCondLUT[mA].data();
+                        const float *__restrict kRow = kThermalCondLUT[mA].data();
 
                         float netFlux = 0.0f;
                         if (x > 0) netFlux += kRow[safeMatIdx(mat[i - 1])] * (tempIn[i - 1] - Ta);
@@ -167,17 +167,17 @@ void SimWorld::stepThermoElectric() {
     }
 
     // 2. Electrical charge conduction & Joule heating (Sparse Row-Skipped Red-Black SOR)
-    constexpr int kElectricIters = 14;
-    constexpr float kAlpha = 35.0f;
-    constexpr float kSorOmega = 1.45f;
+    constexpr int kElectricIters = 36;
+    constexpr float kAlpha = 520.0f;
+    constexpr float kSorOmega = 1.70f;
 
-    float* __restrict charge = m_charge.data();
-    float* __restrict chargeTmp = m_chargeTmp.data();
-    float* __restrict tempK = m_tempK.data();
+    float *__restrict charge = m_charge.data();
+    float *__restrict chargeTmp = m_chargeTmp.data();
+    float *__restrict tempK = m_tempK.data();
 
     uint8_t stackRowFlags[2048];
     std::vector<uint8_t> heapRowFlags;
-    uint8_t* rowFlags = stackRowFlags;
+    uint8_t *rowFlags = stackRowFlags;
     if (H > 2048) {
         heapRowFlags.resize(static_cast<size_t>(H));
         rowFlags = heapRowFlags.data();
@@ -241,6 +241,7 @@ void SimWorld::stepThermoElectric() {
             const int hiY = std::min(maxCondY, maxActY + span);
             if (loY > hiY) continue;
 
+            const float omega = (iter == 0) ? 1.0f : kSorOmega;
             anyMoved.store(false, std::memory_order_relaxed);
             for (int color = 0; color < 2; ++color) {
                 m_pool.parallelFor(loY, hiY + 1, [&](int y0, int y1) {
@@ -257,7 +258,7 @@ void SimWorld::stepThermoElectric() {
                             if (mA == batteryIdx) continue;
                             if (kElecCondLUT[mA] <= 0.005f) continue;
 
-                            const float* __restrict gRow = kElecCouplingLUT[mA].data();
+                            const float *__restrict gRow = kElecCouplingLUT[mA].data();
                             float sumG = 0.0f;
                             float sumGQ = 0.0f;
 
@@ -267,8 +268,8 @@ void SimWorld::stepThermoElectric() {
                                 const float gU = gRow[safeMatIdx(mat[i - W])];
                                 const float gD = gRow[safeMatIdx(mat[i + W])];
                                 sumG = gL + gR + gU + gD;
-                                sumGQ = gL * charge[i - 1] + gR * charge[i + 1] +
-                                        gU * charge[i - W] + gD * charge[i + W];
+                                sumGQ =
+                                    gL * charge[i - 1] + gR * charge[i + 1] + gU * charge[i - W] + gD * charge[i + W];
                             } else {
                                 if (x > 0) {
                                     const float g = gRow[safeMatIdx(mat[i - 1])];
@@ -294,18 +295,18 @@ void SimWorld::stepThermoElectric() {
 
                             const float qOld = charge[i];
                             const float qGS = (chargeTmp[i] + kAlpha * sumGQ) / (1.0f + kAlpha * sumG);
-                            const float qNext = std::clamp(qOld + kSorOmega * (qGS - qOld), -5.0f, 5.0f);
+                            const float qNext = std::clamp(qOld + omega * (qGS - qOld), -5.0f, 5.0f);
                             charge[i] = qNext;
                             const float diff = std::abs(qNext - qOld);
                             if (diff > localMaxDelta) localMaxDelta = diff;
                         }
                     }
-                    if (localMaxDelta >= 2e-4f) {
+                    if (localMaxDelta >= 5e-5f) {
                         anyMoved.store(true, std::memory_order_relaxed);
                     }
                 });
             }
-            if (iter >= 2 && !anyMoved.load(std::memory_order_relaxed)) {
+            if (iter >= 6 && !anyMoved.load(std::memory_order_relaxed)) {
                 break;
             }
         }
@@ -313,12 +314,8 @@ void SimWorld::stepThermoElectric() {
 
     // Apply Joule heating (I^2 * R) and gentle charge decay over rows that can hold non-zero charge
     const int maxSpan = 2 * kElectricIters;
-    const int jLoY = (minCondY <= maxCondY)
-                         ? std::min(minActY, std::max(minCondY, minActY - maxSpan))
-                         : minActY;
-    const int jHiY = (minCondY <= maxCondY)
-                         ? std::max(maxActY, std::min(maxCondY, maxActY + maxSpan))
-                         : maxActY;
+    const int jLoY = (minCondY <= maxCondY) ? std::min(minActY, std::max(minCondY, minActY - maxSpan)) : minActY;
+    const int jHiY = (minCondY <= maxCondY) ? std::max(maxActY, std::min(maxCondY, maxActY + maxSpan)) : maxActY;
 
     m_pool.parallelFor(jLoY, jHiY + 1, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
@@ -341,7 +338,7 @@ void SimWorld::stepThermoElectric() {
                 }
 
                 const float qA = charge[i];
-                const float* __restrict jRow = kJouleEdgeLUT[mA].data();
+                const float *__restrict jRow = kJouleEdgeLUT[mA].data();
                 float jouleHeat = 0.0f;
 
                 if (interiorY && x > 0 && x < W - 1) {
@@ -349,10 +346,8 @@ void SimWorld::stepThermoElectric() {
                     const float dqR = charge[i + 1] - qA;
                     const float dqU = charge[i - W] - qA;
                     const float dqD = charge[i + W] - qA;
-                    jouleHeat = jRow[safeMatIdx(mat[i - 1])] * dqL * dqL +
-                                jRow[safeMatIdx(mat[i + 1])] * dqR * dqR +
-                                jRow[safeMatIdx(mat[i - W])] * dqU * dqU +
-                                jRow[safeMatIdx(mat[i + W])] * dqD * dqD;
+                    jouleHeat = jRow[safeMatIdx(mat[i - 1])] * dqL * dqL + jRow[safeMatIdx(mat[i + 1])] * dqR * dqR +
+                                jRow[safeMatIdx(mat[i - W])] * dqU * dqU + jRow[safeMatIdx(mat[i + W])] * dqD * dqD;
                 } else {
                     if (x > 0) {
                         const float dq = charge[i - 1] - qA;
@@ -380,7 +375,7 @@ void SimWorld::stepThermoElectric() {
                     tempK[i] = std::isfinite(nextT) ? std::clamp(nextT, 1.0f, 8000.0f) : tempK[i];
                 }
 
-                const float decay = (ecA > 0.25f) ? 0.99992f : 0.994f;
+                const float decay = (ecA > 0.50f) ? 0.99998f : ((ecA > 0.25f) ? 0.9995f : 0.994f);
                 float qDecayed = qA * decay;
                 if (mA == plasmaIdx) {
                     qDecayed = std::max(qDecayed, 1.8f);
@@ -396,22 +391,22 @@ void SimWorld::stepThermoElectric() {
 void SimWorld::stepLighting() {
     const int W = m_width;
     const int H = m_height;
-    const uint8_t* __restrict mat = m_mat.data();
-    const float* __restrict tempK = m_tempK.data();
-    const float* __restrict charge = m_charge.data();
+    const uint8_t *__restrict mat = m_mat.data();
+    const float *__restrict tempK = m_tempK.data();
+    const float *__restrict charge = m_charge.data();
 
     // Seed emissive + ambient light sources at every pixel
     m_pool.parallelFor(0, H, [&](int y0, int y1) {
-        float* __restrict lightR = m_lightR.data();
-        float* __restrict lightG = m_lightG.data();
-        float* __restrict lightB = m_lightB.data();
+        float *__restrict lightR = m_lightR.data();
+        float *__restrict lightG = m_lightG.data();
+        float *__restrict lightB = m_lightB.data();
 
         for (int y = y0; y < y1; ++y) {
             const int row = y * W;
             for (int x = 0; x < W; ++x) {
                 const int i = row + x;
                 const MaterialId m = fromIdx(mat[i]);
-                const auto& props = getMaterial(m);
+                const auto &props = getMaterial(m);
 
                 float bbR = 0.0f, bbG = 0.0f, bbB = 0.0f;
                 blackbodyGlow(tempK[i], bbR, bbG, bbB);
@@ -447,12 +442,12 @@ void SimWorld::stepLighting() {
     constexpr float kInvFullW = 1.0f / (4.0f + 4.0f * kDiagW);
 
     for (int iter = 0; iter < kLightIters; ++iter) {
-        const float* __restrict inR = m_lightR.data();
-        const float* __restrict inG = m_lightG.data();
-        const float* __restrict inB = m_lightB.data();
-        float* __restrict outR = m_lightTmpR.data();
-        float* __restrict outG = m_lightTmpG.data();
-        float* __restrict outB = m_lightTmpB.data();
+        const float *__restrict inR = m_lightR.data();
+        const float *__restrict inG = m_lightG.data();
+        const float *__restrict inB = m_lightB.data();
+        float *__restrict outR = m_lightTmpR.data();
+        float *__restrict outG = m_lightTmpG.data();
+        float *__restrict outB = m_lightTmpB.data();
 
         m_pool.parallelFor(0, H, [&](int y0, int y1) {
             for (int y = y0; y < y1; ++y) {

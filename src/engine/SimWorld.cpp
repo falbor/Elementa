@@ -1,6 +1,7 @@
 #include "sim/SimWorld.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -16,11 +17,8 @@ double msBetween(Clock::time_point a, Clock::time_point b) noexcept {
 } // namespace
 
 SimWorld::SimWorld(int width, int height, unsigned threads, uint32_t seed)
-    : m_width(std::max(16, width))
-    , m_height(std::max(16, height))
-    , m_count(m_width * m_height)
-    , m_pool(threads)
-    , m_rngState(seed ? seed : 0x5EED1234u) {
+    : m_width(std::max(16, width)), m_height(std::max(16, height)), m_count(m_width * m_height), m_pool(threads),
+      m_rngState(seed ? seed : 0x5EED1234u) {
 
     const size_t n = static_cast<size_t>(m_count);
     m_mat.assign(n, toIdx(MaterialId::Air));
@@ -68,15 +66,14 @@ uint32_t SimWorld::nextRand() noexcept {
 }
 
 uint32_t SimWorld::hashCoord(int x, int y, uint64_t tick) const noexcept {
-    uint32_t h = static_cast<uint32_t>(x) * 374761393u +
-                 static_cast<uint32_t>(y) * 668265263u +
+    uint32_t h = static_cast<uint32_t>(x) * 374761393u + static_cast<uint32_t>(y) * 668265263u +
                  static_cast<uint32_t>(tick) * 2147483647u;
     h = (h ^ (h >> 13)) * 1274126177u;
     return h ^ (h >> 16);
 }
 
 void SimWorld::clear(MaterialId fill) {
-    const auto& props = getMaterial(fill);
+    const auto &props = getMaterial(fill);
     const uint8_t matIdx = toIdx(fill);
     for (int i = 0; i < m_count; ++i) {
         m_mat[i] = matIdx;
@@ -84,10 +81,11 @@ void SimWorld::clear(MaterialId fill) {
         m_vy[i] = 0.0f;
         m_fx[i] = 0.0f;
         m_fy[i] = 0.0f;
-        m_life[i] = (fill == MaterialId::Fire) ? 28.0f :
-                    (fill == MaterialId::Spark) ? 14.0f :
-                    (fill == MaterialId::Plasma) ? 45.0f :
-                    (fill == MaterialId::Acid) ? 100.0f : 0.0f;
+        m_life[i] = (fill == MaterialId::Fire)     ? 28.0f
+                    : (fill == MaterialId::Spark)  ? 14.0f
+                    : (fill == MaterialId::Plasma) ? 45.0f
+                    : (fill == MaterialId::Acid)   ? 100.0f
+                                                   : 0.0f;
         m_charge[i] = (fill == MaterialId::Spark || fill == MaterialId::Plasma) ? 1.0f : 0.0f;
         m_colorSeed[i] = static_cast<uint8_t>(nextRand() & 0xFFu);
         m_movedTick[i] = 0;
@@ -111,7 +109,7 @@ void SimWorld::clear(MaterialId fill) {
 void SimWorld::setCell(int x, int y, MaterialId mat, bool resetVelocity) {
     if (!inBounds(x, y)) return;
     const int i = index(x, y);
-    const auto& props = getMaterial(mat);
+    const auto &props = getMaterial(mat);
     m_mat[i] = toIdx(mat);
     m_tempK[i] = (mat == MaterialId::Air) ? m_ambientTempK : props.defaultTempK;
     m_colorSeed[i] = static_cast<uint8_t>(nextRand() & 0xFFu);
@@ -166,7 +164,7 @@ void SimWorld::setCellCharge(int x, int y, float charge) {
 }
 
 void SimWorld::convertCell(int idx, MaterialId newMat, bool keepTemp) noexcept {
-    const auto& props = getMaterial(newMat);
+    const auto &props = getMaterial(newMat);
     m_mat[idx] = toIdx(newMat);
     if (!keepTemp) {
         m_tempK[idx] = props.defaultTempK;
@@ -190,7 +188,7 @@ void SimWorld::convertCell(int idx, MaterialId newMat, bool keepTemp) noexcept {
 void SimWorld::paintCircle(int cx, int cy, int radius, MaterialId mat, bool overwriteSolid) {
     const int r = std::max(0, radius);
     const int r2 = r * r;
-    const auto& targetProps = getMaterial(mat);
+    const auto &targetProps = getMaterial(mat);
     const bool paintingSolidOrErase = (mat == MaterialId::Air) || targetProps.isSolidObstacle();
 
     for (int dy = -r; dy <= r; ++dy) {
@@ -228,12 +226,19 @@ void SimWorld::paintLine(int x0, int y0, int x1, int y1, int radius, MaterialId 
         paintCircle(x, y, radius, mat, overwriteSolid);
         if (x == x1 && y == y1) break;
         const int e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
+        if (e2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y += sy;
+        }
     }
 }
 
-void SimWorld::applyToolCircle(ToolMode tool, int cx, int cy, int radius, float dxStroke, float dyStroke, MaterialId paintMat) {
+void SimWorld::applyToolCircle(ToolMode tool, int cx, int cy, int radius, float dxStroke, float dyStroke,
+                               MaterialId paintMat) {
     if (tool == ToolMode::Material) {
         paintCircle(cx, cy, radius, paintMat, false);
         return;
@@ -256,7 +261,7 @@ void SimWorld::applyToolCircle(ToolMode tool, int cx, int cy, int radius, float 
 
             const int i = index(x, y);
             const float falloff = 1.0f - std::sqrt(static_cast<float>(d2)) / static_cast<float>(r + 1);
-            const MaterialProps& props = getMaterial(fromIdx(m_mat[i]));
+            const MaterialProps &props = getMaterial(fromIdx(m_mat[i]));
 
             switch (tool) {
             case ToolMode::Wind: {
@@ -329,64 +334,190 @@ void SimWorld::applyToolLine(ToolMode tool, int x0, int y0, int x1, int y1, int 
         applyToolCircle(tool, x, y, radius, strokeDx, strokeDy, paintMat);
         if (x == x1 && y == y1) break;
         const int e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
+        if (e2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y += sy;
+        }
     }
 }
 
 void SimWorld::detonate(int cx, int cy, int radius, float blastStrength, float peakTempK) {
     const int r = std::max(2, radius);
     const int r2 = r * r;
+    const int rInner2 = r2 / 3;
     const int rShock = r * 2;
     const int rShock2 = rShock * rShock;
 
-    for (int dy = -rShock; dy <= rShock; ++dy) {
-        const int y = cy + dy;
-        if (y < 0 || y >= m_height) continue;
-        for (int dx = -rShock; dx <= rShock; ++dx) {
-            const int x = cx + dx;
-            if (x < 0 || x >= m_width) continue;
+    const int x0 = std::max(0, cx - rShock);
+    const int x1 = std::min(m_width - 1, cx + rShock);
+    const int y0 = std::max(0, cy - rShock);
+    const int y1 = std::min(m_height - 1, cy + rShock);
+    if (x0 > x1 || y0 > y1) return;
+
+    const int bw = x1 - x0 + 1;
+    const int bh = y1 - y0 + 1;
+    const size_t boxCount = static_cast<size_t>(bw) * static_cast<size_t>(bh);
+
+    // Snapshot pre-detonation solid occlusion codes so blast raycasts are symmetric and scan-order independent:
+    // 0 = open, 1 = unbreakable StaticSolid, 2 = inner Stone (falloff > 0.72), 3 = fragile wall inside r^2/3, 4 =
+    // fragile wall outside r^2/3
+    std::array<uint8_t, 4096> stackCodes{};
+    std::vector<uint8_t> heapCodes;
+    uint8_t *codes = stackCodes.data();
+    if (boxCount > stackCodes.size()) {
+        heapCodes.resize(boxCount);
+        codes = heapCodes.data();
+    }
+
+    for (int y = y0; y <= y1; ++y) {
+        const int dy = y - cy;
+        const int rowOff = (y - y0) * bw;
+        for (int x = x0; x <= x1; ++x) {
+            const int dx = x - cx;
+            const int d2 = dx * dx + dy * dy;
+            uint8_t code = 0;
+            if (d2 <= rShock2) {
+                const MaterialId m = fromIdx(m_mat[index(x, y)]);
+                if (getMaterial(m).isSolidObstacle()) {
+                    if (d2 <= rInner2) {
+                        if (m == MaterialId::Wood || m == MaterialId::Plant || m == MaterialId::Glass ||
+                            m == MaterialId::Ice) {
+                            code = 3;
+                        } else if (m == MaterialId::Stone) {
+                            const float dist = std::sqrt(static_cast<float>(d2));
+                            const float falloff = 1.0f - dist / static_cast<float>(r + 1);
+                            code = (falloff > 0.72f) ? 2 : 1;
+                        } else {
+                            code = 1;
+                        }
+                    } else {
+                        code = (m == MaterialId::Wood || m == MaterialId::Plant || m == MaterialId::Glass ||
+                                m == MaterialId::Ice)
+                                   ? 4
+                                   : 1;
+                    }
+                }
+            }
+            codes[rowOff + (x - x0)] = code;
+        }
+    }
+
+    auto codeAt = [&](int gx, int gy) noexcept -> uint8_t {
+        if (gx < x0 || gx > x1 || gy < y0 || gy > y1) return 1;
+        return codes[(gy - y0) * bw + (gx - x0)];
+    };
+
+    auto codeTrans = [](uint8_t c) noexcept -> float {
+        if (c == 0) return 1.0f;
+        if (c == 3) return 0.45f;
+        if (c == 2) return 0.25f;
+        return 0.0f;
+    };
+
+    // Exact integer Amanatides-Woo grid raycast from (cx, cy) to (tx, ty) checking intermediate StaticSolid cells
+    // and preventing diagonal corner tunneling across sealed 1-px diagonal barriers.
+    auto computeBlastTransmission = [&](int tx, int ty) noexcept -> float {
+        if (tx == cx && ty == cy) return 1.0f;
+        const int dx = tx - cx;
+        const int dy = ty - cy;
+        const int sx = (dx > 0) ? 1 : ((dx < 0) ? -1 : 0);
+        const int sy = (dy > 0) ? 1 : ((dy < 0) ? -1 : 0);
+        const int adx = std::abs(dx);
+        const int ady = std::abs(dy);
+
+        int x = cx;
+        int y = cy;
+        int tMaxX = ady;
+        int tMaxY = adx;
+        const int tDeltaX = 2 * ady;
+        const int tDeltaY = 2 * adx;
+        float trans = 1.0f;
+
+        while (x != tx || y != ty) {
+            if (tMaxX < tMaxY) {
+                x += sx;
+                tMaxX += tDeltaX;
+            } else if (tMaxY < tMaxX) {
+                y += sy;
+                tMaxY += tDeltaY;
+            } else {
+                const uint8_t cX = codeAt(x + sx, y);
+                const uint8_t cY = codeAt(x, y + sy);
+                if (cX != 0 && cY != 0) {
+                    trans *= std::min(codeTrans(cX), codeTrans(cY));
+                    if (trans < 0.01f) return 0.0f;
+                }
+                x += sx;
+                y += sy;
+                tMaxX += tDeltaX;
+                tMaxY += tDeltaY;
+            }
+
+            if (x == tx && y == ty) {
+                return trans;
+            }
+
+            const uint8_t c = codeAt(x, y);
+            if (c != 0) {
+                trans *= codeTrans(c);
+                if (trans < 0.01f) return 0.0f;
+            }
+        }
+        return trans;
+    };
+
+    for (int y = y0; y <= y1; ++y) {
+        const int dy = y - cy;
+        for (int x = x0; x <= x1; ++x) {
+            const int dx = x - cx;
             const int d2 = dx * dx + dy * dy;
             if (d2 > rShock2) continue;
 
             const int i = index(x, y);
+            const MaterialId existing = fromIdx(m_mat[i]);
+            if (existing == MaterialId::Bedrock) continue;
+            const auto &props = getMaterial(existing);
+            if (d2 > r2 && !props.isMovable()) continue;
+
+            const float trans = computeBlastTransmission(x, y);
+            if (trans <= 0.0f) continue;
+
             const float dist = std::sqrt(static_cast<float>(d2));
             const float shockFalloff = 1.0f - dist / static_cast<float>(rShock + 1);
-            const MaterialId existing = fromIdx(m_mat[i]);
-            const auto& props = getMaterial(existing);
 
             if (dist > 0.1f && props.isMovable()) {
                 const float nx = static_cast<float>(dx) / dist;
                 const float ny = static_cast<float>(dy) / dist;
                 const float invRho = 1.0f / std::max(0.45f, props.density);
-                const float kick = blastStrength * shockFalloff * 2.2f * invRho;
+                const float kick = blastStrength * trans * shockFalloff * 2.2f * invRho;
                 m_vx[i] = std::clamp(m_vx[i] + nx * kick, -12.0f, 12.0f);
-                m_vy[i] = std::clamp(m_vy[i] + ny * kick - 0.22f * shockFalloff, -12.0f, 12.0f);
+                m_vy[i] = std::clamp(m_vy[i] + ny * kick - 0.22f * shockFalloff * trans, -12.0f, 12.0f);
             }
 
             if (d2 > r2) continue;
             const float falloff = 1.0f - dist / static_cast<float>(r + 1);
 
             // Inject expansion divergence & heat inside core blast radius
-            if (existing != MaterialId::Bedrock) {
-                m_blastDiv[i] += blastStrength * falloff;
-                m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK - kAmbientTempK) * falloff);
-            }
+            m_blastDiv[i] += blastStrength * falloff * trans;
+            m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK - kAmbientTempK) * falloff * trans);
 
             // Inner fireball breaks fragile walls (except bedrock/obsidian/metal)
-            if (d2 <= (r * r) / 3) {
-                if (existing == MaterialId::Air || existing == MaterialId::Smoke ||
-                    existing == MaterialId::Gunpowder || existing == MaterialId::Nitro ||
-                    existing == MaterialId::Methane) {
+            if (d2 <= rInner2 && trans >= 0.40f) {
+                if (existing == MaterialId::Air || existing == MaterialId::Smoke || existing == MaterialId::Gunpowder ||
+                    existing == MaterialId::Nitro || existing == MaterialId::Methane) {
                     setCell(x, y, (nextRand() % 4u == 0u) ? MaterialId::Spark : MaterialId::Fire, false);
-                    m_tempK[i] = peakTempK;
+                    m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK - kAmbientTempK) * trans);
                 } else if (existing == MaterialId::Wood || existing == MaterialId::Plant ||
                            existing == MaterialId::Glass || existing == MaterialId::Ice) {
                     setCell(x, y, MaterialId::Fire, false);
-                    m_tempK[i] = peakTempK * 0.85f;
-                } else if (existing == MaterialId::Stone && falloff > 0.72f) {
+                    m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK * 0.85f - kAmbientTempK) * trans);
+                } else if (existing == MaterialId::Stone && falloff * trans > 0.72f) {
                     setCell(x, y, MaterialId::Sand, false);
-                    m_tempK[i] = peakTempK * 0.75f;
+                    m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK * 0.75f - kAmbientTempK) * trans);
                 }
             }
         }
@@ -439,7 +570,7 @@ void SimWorld::computeStats() {
 
     for (int i = 0; i < m_count; ++i) {
         const MaterialId m = fromIdx(m_mat[i]);
-        const auto& props = getMaterial(m);
+        const auto &props = getMaterial(m);
         const float T = m_tempK[i];
         thermal += static_cast<double>(props.heatCapacity) * static_cast<double>(T);
 
@@ -500,13 +631,12 @@ uint32_t SimWorld::countMaterial(MaterialId mat) const noexcept {
 double SimWorld::computeTotalThermalEnergy() const noexcept {
     double sum = 0.0;
     for (int i = 0; i < m_count; ++i) {
-        sum += static_cast<double>(getMaterial(fromIdx(m_mat[i])).heatCapacity) *
-               static_cast<double>(m_tempK[i]);
+        sum += static_cast<double>(getMaterial(fromIdx(m_mat[i])).heatCapacity) * static_cast<double>(m_tempK[i]);
     }
     return sum;
 }
 
-bool SimWorld::savePPM(const std::string& path, ViewMode mode) {
+bool SimWorld::savePPM(const std::string &path, ViewMode mode) {
     render(mode);
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
@@ -518,7 +648,7 @@ bool SimWorld::savePPM(const std::string& path, ViewMode mode) {
         rgb[i * 3 + 1] = static_cast<uint8_t>((c >> 8) & 0xFFu);
         rgb[i * 3 + 2] = static_cast<uint8_t>(c & 0xFFu);
     }
-    out.write(reinterpret_cast<const char*>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
+    out.write(reinterpret_cast<const char *>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
     return static_cast<bool>(out);
 }
 
@@ -560,8 +690,10 @@ void SimWorld::loadPreset(PresetId preset) {
         const int throatHalf = std::max(2, W * 2 / 100);
         paintLine(funnelCx - funnelHalfTop, funnelTopY, funnelCx - throatHalf, funnelBotY, 1, MaterialId::Stone);
         paintLine(funnelCx + funnelHalfTop, funnelTopY, funnelCx + throatHalf, funnelBotY, 1, MaterialId::Stone);
-        fillRect(funnelCx - funnelHalfTop / 2, H * 8 / 100, funnelCx + funnelHalfTop / 2, H * 20 / 100, MaterialId::Sand);
-        fillRect(funnelCx - funnelHalfTop / 3, H * 3 / 100, funnelCx + funnelHalfTop / 3, H * 7 / 100, MaterialId::Salt);
+        fillRect(funnelCx - funnelHalfTop / 2, H * 8 / 100, funnelCx + funnelHalfTop / 2, H * 20 / 100,
+                 MaterialId::Sand);
+        fillRect(funnelCx - funnelHalfTop / 3, H * 3 / 100, funnelCx + funnelHalfTop / 3, H * 7 / 100,
+                 MaterialId::Salt);
 
         // Water & Oil tank strictly below hourglass
         const int tankL = std::max(2, W * 5 / 100);
@@ -601,9 +733,10 @@ void SimWorld::loadPreset(PresetId preset) {
 
         const int shelfY = H * 32 / 100;
         const int shelfThick = std::max(2, H / 30);
+        const int fuseEnd = W * 87 / 100;
         fillRect(W * 66 / 100, shelfY, W * 92 / 100, shelfY + shelfThick - 1, MaterialId::Wood);
-        fillRect(W * 68 / 100, shelfY - shelfThick, W * 86 / 100, shelfY - 1, MaterialId::Gunpowder);
-        paintCircle(W * 88 / 100, shelfY - std::max(2, shelfThick), std::max(2, H / 34), MaterialId::Fire, true);
+        fillRect(W * 68 / 100, shelfY - shelfThick, fuseEnd, shelfY - 1, MaterialId::Gunpowder);
+        paintCircle(fuseEnd, shelfY - std::max(2, shelfThick / 2 + 1), std::max(2, H / 34), MaterialId::Fire, true);
         break;
     }
 
@@ -622,8 +755,10 @@ void SimWorld::loadPreset(PresetId preset) {
 
         for (int y = peakY; y < floorY; ++y) {
             const float t = static_cast<float>(y - peakY) / static_cast<float>(std::max(1, floorY - 1 - peakY));
-            const int halfW = static_cast<int>(coneTopHalf + t * static_cast<float>(baseHalf - coneTopHalf));
-            int ventW = static_cast<int>(ventTopHalf + t * static_cast<float>(ventBotHalf - ventTopHalf));
+            const int halfW =
+                static_cast<int>(static_cast<float>(coneTopHalf) + t * static_cast<float>(baseHalf - coneTopHalf));
+            int ventW =
+                static_cast<int>(static_cast<float>(ventTopHalf) + t * static_cast<float>(ventBotHalf - ventTopHalf));
             if (t > 0.65f) {
                 ventW = std::min(halfW - minWall,
                                  ventW + static_cast<int>((t - 0.65f) * static_cast<float>(baseHalf) * 0.65f));
@@ -744,7 +879,8 @@ void SimWorld::loadPreset(PresetId preset) {
         const int tankR = std::min(W - 3, W * 84 / 100);
         const int glassWall = 2;
         fillRect(tankL, targetTop, tankR, floorY - 1, MaterialId::Glass);
-        fillRect(tankL + glassWall, targetTop + glassWall, tankR - glassWall, floorY - 1 - glassWall, MaterialId::Methane);
+        fillRect(tankL + glassWall, targetTop + glassWall, tankR - glassWall, floorY - 1 - glassWall,
+                 MaterialId::Methane);
 
         // Battery electrical igniter feeding copper wire straight into Gunpowder
         const int batL = std::max(2, W * 5 / 100);
@@ -769,11 +905,11 @@ void SimWorld::loadPreset(PresetId preset) {
 
         // 4V Battery -> copper rails -> SaltWater bridge -> Ice & Gunpowder load
         const int railTop = H * 28 / 100;
-        const int railBot = railTop + std::max(2, H / 40);
-        const int batL = W * 20 / 100;
-        const int batR = W * 26 / 100;
-        const int leftElecX = W * 44 / 100;
-        const int rightElecX = W * 56 / 100;
+        const int railBot = railTop + std::max(2, H / 34);
+        const int batL = W * 22 / 100;
+        const int batR = W * 28 / 100;
+        const int leftElecX = W * 46 / 100;
+        const int rightElecX = W * 54 / 100;
         const int elecW = std::max(2, W / 55);
         const int elecDipY = troughTop + wall + std::max(2, (troughBot - wall - (troughTop + wall)) / 2);
 
@@ -782,13 +918,13 @@ void SimWorld::loadPreset(PresetId preset) {
         fillRect(leftElecX, railTop, leftElecX + elecW - 1, elecDipY, MaterialId::Metal);
 
         fillRect(rightElecX, railTop, rightElecX + elecW - 1, elecDipY, MaterialId::Metal);
-        fillRect(rightElecX, railTop, W * 78 / 100, railBot, MaterialId::Metal);
+        fillRect(rightElecX, railTop, W * 76 / 100, railBot, MaterialId::Metal);
 
         // Place Ice cube & Gunpowder fuse strictly above the metal rail without cutting it
         const int iceH = std::max(4, H * 8 / 100);
         const int powH = std::max(2, H / 35);
-        fillRect(W * 68 / 100, std::max(2, railTop - iceH), W * 76 / 100, railTop - 1, MaterialId::Ice);
-        fillRect(W * 60 / 100, std::max(2, railTop - powH), W * 64 / 100, railTop - 1, MaterialId::Gunpowder);
+        fillRect(W * 66 / 100, std::max(2, railTop - iceH), W * 74 / 100, railTop - 1, MaterialId::Ice);
+        fillRect(W * 58 / 100, std::max(2, railTop - powH), W * 62 / 100, railTop - 1, MaterialId::Gunpowder);
         break;
     }
 
