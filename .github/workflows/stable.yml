@@ -104,7 +104,7 @@ jobs:
           Compress-Archive -Path dist/windows-mingw/* -DestinationPath "packages/Elementa-$env:VERSION-windows-x64-mingw-static.zip" -Force
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stable-windows-mingw
           path: packages/*.zip
@@ -135,7 +135,7 @@ jobs:
           Compress-Archive -Path dist/windows-msvc/* -DestinationPath "packages/Elementa-$env:VERSION-windows-x64-msvc.zip" -Force
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stable-windows-msvc
           path: packages/*.zip
@@ -190,7 +190,7 @@ jobs:
           tar -C "dist/${{ matrix.pkg_os }}" -czf "packages/Elementa-${VERSION}-${{ matrix.pkg_os }}-headless.tar.gz" .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stable-${{ matrix.pkg_os }}
           path: packages/*.tar.gz

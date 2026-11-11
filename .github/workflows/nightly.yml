@@ -92,7 +92,7 @@ jobs:
           Compress-Archive -Path dist/windows-mingw/* -DestinationPath packages/Elementa-nightly-windows-x64-mingw-static.zip -Force
 
       - name: Upload Windows MinGW package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-windows-mingw
           path: packages/Elementa-nightly-windows-x64-mingw-static.zip
@@ -121,7 +121,7 @@ jobs:
           Compress-Archive -Path dist/windows-msvc/* -DestinationPath packages/Elementa-nightly-windows-x64-msvc.zip -Force
 
       - name: Upload Windows MSVC package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-windows-msvc
           path: packages/Elementa-nightly-windows-x64-msvc.zip
@@ -163,7 +163,7 @@ jobs:
           tar -C dist/linux-x64-headless -czf packages/Elementa-nightly-linux-x64-headless.tar.gz .
 
       - name: Upload Linux package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-linux-headless
           path: packages/Elementa-nightly-linux-x64-headless.tar.gz
