@@ -85,6 +85,7 @@ void SimWorld::clear(MaterialId fill) {
                     : (fill == MaterialId::Spark)  ? 14.0f
                     : (fill == MaterialId::Plasma) ? 45.0f
                     : (fill == MaterialId::Acid)   ? 100.0f
+                    : (fill == MaterialId::Smoke || fill == MaterialId::Steam) ? 350.0f
                                                    : 0.0f;
         m_charge[i] = (fill == MaterialId::Spark || fill == MaterialId::Plasma) ? 1.0f : 0.0f;
         m_colorSeed[i] = static_cast<uint8_t>(nextRand() & 0xFFu);
@@ -104,6 +105,12 @@ void SimWorld::clear(MaterialId fill) {
     m_stats = SimStats{};
     m_stats.minTempK = m_ambientTempK;
     m_stats.maxTempK = m_ambientTempK;
+    if (m_continuum) {
+        m_continuum->clear();
+        for (int i = 0; i < m_count; ++i) resetContinuumCell(i, fill);
+        std::fill(m_contU.begin(), m_contU.end(), 0.0f);
+        std::fill(m_contV.begin(), m_contV.end(), 0.0f);
+    }
 }
 
 void SimWorld::setCell(int x, int y, MaterialId mat, bool resetVelocity) {
@@ -144,26 +151,44 @@ void SimWorld::setCell(int x, int y, MaterialId mat, bool resetVelocity) {
         m_life[i] = 0.0f;
         m_charge[i] = 0.0f;
     }
+    if (m_continuum) resetContinuumCell(i, mat);
+}
+
+void SimWorld::setAmbientTempK(float tempK) noexcept {
+    if (std::isfinite(tempK)) m_ambientTempK = std::clamp(tempK, 1.0f, 8000.0f);
 }
 
 void SimWorld::setCellTemp(int x, int y, float tempK) {
-    if (!inBounds(x, y)) return;
+    if (!inBounds(x, y) || !std::isfinite(tempK)) return;
     m_tempK[index(x, y)] = std::clamp(tempK, 1.0f, 8000.0f);
 }
 
 void SimWorld::setCellVelocity(int x, int y, float vx, float vy) {
-    if (!inBounds(x, y)) return;
+    if (!inBounds(x, y) || !std::isfinite(vx) || !std::isfinite(vy)) return;
     const int i = index(x, y);
     m_vx[i] = std::clamp(vx, -12.0f, 12.0f);
     m_vy[i] = std::clamp(vy, -12.0f, 12.0f);
 }
 
 void SimWorld::setCellCharge(int x, int y, float charge) {
-    if (!inBounds(x, y)) return;
+    if (!inBounds(x, y) || !std::isfinite(charge)) return;
     m_charge[index(x, y)] = std::clamp(charge, -5.0f, 5.0f);
 }
 
 void SimWorld::convertCell(int idx, MaterialId newMat, bool keepTemp) noexcept {
+    if (m_continuum) {
+        const auto oldMat = fromIdx(m_mat[idx]);
+        if (m_continuum->amount(oldMat, idx % m_width, idx / m_width) > 0.0f) {
+            float quantity = m_continuum->amount(oldMat, idx % m_width, idx / m_width);
+            if (getMaterial(newMat).phase == PhaseState::Liquid && getMaterial(oldMat).phase != PhaseState::Liquid) {
+                float fill = 0.0f;
+                for (const auto &material : getAllMaterials())
+                    if (material.phase == PhaseState::Liquid) fill += m_continuum->field(material.id)[idx];
+                quantity = std::min(quantity, std::max(0.0f, 1.0f - fill));
+            }
+            m_continuum->convertAmount(oldMat, newMat, idx % m_width, idx / m_width, quantity);
+        } else resetContinuumCell(idx, newMat);
+    }
     const auto &props = getMaterial(newMat);
     m_mat[idx] = toIdx(newMat);
     if (!keepTemp) {
@@ -509,14 +534,18 @@ void SimWorld::detonate(int cx, int cy, int radius, float blastStrength, float p
             if (d2 <= rInner2 && trans >= 0.40f) {
                 if (existing == MaterialId::Air || existing == MaterialId::Smoke || existing == MaterialId::Gunpowder ||
                     existing == MaterialId::Nitro || existing == MaterialId::Methane) {
-                    setCell(x, y, (nextRand() % 4u == 0u) ? MaterialId::Spark : MaterialId::Fire, false);
+                    const auto product = (nextRand() % 4u == 0u) ? MaterialId::Spark : MaterialId::Fire;
+                    if (m_continuum) convertCell(i, product, true);
+                    else setCell(x, y, product, false);
                     m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK - kAmbientTempK) * trans);
                 } else if (existing == MaterialId::Wood || existing == MaterialId::Plant ||
                            existing == MaterialId::Glass || existing == MaterialId::Ice) {
-                    setCell(x, y, MaterialId::Fire, false);
+                    if (m_continuum) convertCell(i, MaterialId::Fire, true);
+                    else setCell(x, y, MaterialId::Fire, false);
                     m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK * 0.85f - kAmbientTempK) * trans);
                 } else if (existing == MaterialId::Stone && falloff * trans > 0.72f) {
-                    setCell(x, y, MaterialId::Sand, false);
+                    if (m_continuum) convertCell(i, MaterialId::Sand, true);
+                    else setCell(x, y, MaterialId::Sand, false);
                     m_tempK[i] = std::max(m_tempK[i], kAmbientTempK + (peakTempK * 0.75f - kAmbientTempK) * trans);
                 }
             }
@@ -541,6 +570,8 @@ void SimWorld::step() {
 
     stepReactions();
     const auto t3 = Clock::now();
+    if (m_continuum) stepContinuum();
+    const auto tContinuum = Clock::now();
 
     stepParticles();
     const auto t4 = Clock::now();
@@ -552,10 +583,10 @@ void SimWorld::step() {
     const auto t6 = Clock::now();
 
     ++m_stats.tick;
-    m_stats.fluidMs = msBetween(t0, t1);
+    m_stats.fluidMs = msBetween(t0, t1) + msBetween(t3, tContinuum);
     m_stats.thermoMs = msBetween(t1, t2);
     m_stats.reactionMs = msBetween(t2, t3);
-    m_stats.particleMs = msBetween(t3, t4);
+    m_stats.particleMs = msBetween(tContinuum, t4);
     m_stats.lightMs = msBetween(t4, t5);
     m_stats.totalStepMs = msBetween(t0, t6);
 }
@@ -591,7 +622,7 @@ void SimWorld::computeStats() {
     }
 
     m_stats.activeParticles = active;
-    m_stats.totalThermalEnergy = thermal;
+    m_stats.totalThermalEnergy = m_continuum ? computeTotalThermalEnergy() : thermal;
     m_stats.totalKineticEnergy = kinetic;
     m_stats.minTempK = minT;
     m_stats.maxTempK = maxT;
@@ -630,6 +661,13 @@ uint32_t SimWorld::countMaterial(MaterialId mat) const noexcept {
 
 double SimWorld::computeTotalThermalEnergy() const noexcept {
     double sum = 0.0;
+    if (m_continuum) {
+        for (const auto &material : getAllMaterials()) {
+            const auto amounts = m_continuum->field(material.id);
+            for (int i = 0; i < m_count; ++i) sum += static_cast<double>(amounts[i]) * material.heatCapacity * m_tempK[i];
+        }
+        return sum;
+    }
     for (int i = 0; i < m_count; ++i) {
         sum += static_cast<double>(getMaterial(fromIdx(m_mat[i])).heatCapacity) * static_cast<double>(m_tempK[i]);
     }
@@ -649,6 +687,7 @@ bool SimWorld::savePPM(const std::string &path, ViewMode mode) {
         rgb[i * 3 + 2] = static_cast<uint8_t>(c & 0xFFu);
     }
     out.write(reinterpret_cast<const char *>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
+    out.close(); // Include buffered writes and close errors in the result.
     return static_cast<bool>(out);
 }
 

@@ -21,6 +21,7 @@ namespace sim::app {
 struct GlProcs {
     // GL 1.3
     PFNGLACTIVETEXTUREPROC ActiveTexture = nullptr;
+    PFNGLBINDBUFFERPROC BindBuffer = nullptr;
 
     // GL 1.4 / 2.0 blend state
     PFNGLBLENDEQUATIONPROC BlendEquation = nullptr;
@@ -79,6 +80,7 @@ struct GlProcs {
         reset();
         bool ok = true;
         ok = loadProc(ActiveTexture, "glActiveTexture") && ok;
+        ok = loadProc(BindBuffer, "glBindBuffer") && ok;
         ok = loadProc(BlendEquation, "glBlendEquation") && ok;
         ok = loadProc(BlendEquationSeparate, "glBlendEquationSeparate") && ok;
         ok = loadProc(BlendFuncSeparate, "glBlendFuncSeparate") && ok;

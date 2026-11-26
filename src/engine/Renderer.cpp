@@ -430,6 +430,17 @@ inline void shadePhysicalMaterial(MaterialId mat, const MaterialProps &props, co
 
     bool handledComposite = false;
 
+    // Fluids read as continuous volumes, without per-particle grain or glints.
+    if (props.phase == PhaseState::Liquid) {
+        bool crest = false;
+        const float depth = computeLiquidDepth(matPtr, x, y, W, H, gMode, crest);
+        const float tone = 0.88f + 0.12f * std::exp(-depth * 0.045f);
+        outR = r * tone * (0.78f + 0.16f * sunVis + 0.30f * lr);
+        outG = g * tone * (0.78f + 0.16f * sunVis + 0.30f * lg);
+        outB = b * tone * (0.78f + 0.16f * sunVis + 0.30f * lb);
+        return;
+    }
+
     switch (mat) {
     case MaterialId::Stone: {
         // Warped multi-octave sedimentary strata + micro-pits + crystalline quartz specks
@@ -979,8 +990,8 @@ inline void shadePhysicalMaterial(MaterialId mat, const MaterialProps &props, co
         float airBgR = 0.0f, airBgG = 0.0f, airBgB = 0.0f;
         computeAirLightBackdrop(x, y, W, H, sunVis, lr, lg, lb, airBgR, airBgG, airBgB);
 
-        const float cloud = 0.5f + 0.5f * fastWave(fx * 0.11f + seedNorm * 0.5f - tPhase * 0.45f) *
-                                       fastWave(fy * 0.11f + tPhase * 0.35f);
+        const float cloud = 0.5f + 0.5f * fastWave(fx * 0.035f - tPhase * 0.20f) *
+                                       fastWave(fy * 0.035f + tPhase * 0.15f);
         const float gasLitR = 0.52f + 0.36f * sunVis + lr * 0.85f;
         const float gasLitG = 0.52f + 0.36f * sunVis + lg * 0.85f;
         const float gasLitB = 0.56f + 0.36f * sunVis + lb * 0.85f;
@@ -996,9 +1007,9 @@ inline void shadePhysicalMaterial(MaterialId mat, const MaterialProps &props, co
             alpha = std::clamp(0.24f + 0.16f * cloud, 0.18f, 0.42f);
         }
 
-        const float cloudR = (r + (cloud - 0.5f) * 22.0f + seedDelta * 0.65f) * gasLitR;
-        const float cloudG = (g + (cloud - 0.5f) * 22.0f + seedDelta * 0.65f) * gasLitG;
-        const float cloudB = (b + (cloud - 0.5f) * 24.0f + seedDelta * 0.65f) * gasLitB;
+        const float cloudR = (r + (cloud - 0.5f) * 6.0f) * gasLitR;
+        const float cloudG = (g + (cloud - 0.5f) * 6.0f) * gasLitG;
+        const float cloudB = (b + (cloud - 0.5f) * 6.0f) * gasLitB;
         r = airBgR * (1.0f - alpha) + cloudR * alpha;
         g = airBgG * (1.0f - alpha) + cloudG * alpha;
         b = airBgB * (1.0f - alpha) + cloudB * alpha;
@@ -1107,7 +1118,14 @@ void SimWorld::render(ViewMode mode) {
                     float bbScale = 1.0f;
                     float chargeScale = 1.0f;
 
-                    if (mat == MaterialId::Air) {
+                    if (m_continuum && (mat == MaterialId::Air || ContinuumTransport::isSpecies(mat))) {
+                        const auto fluid = fluidVisualAt(x, y);
+                        const float sunVis = computeSunShadow(matPtr, x, y, W, H, false);
+                        computeAirLightBackdrop(x, y, W, H, sunVis, lr, lg, lb, r, g, b);
+                        r = r * (1.0f - fluid[3]) + fluid[0] * 255.0f * (0.78f + 0.16f * sunVis + lr * 0.3f);
+                        g = g * (1.0f - fluid[3]) + fluid[1] * 255.0f * (0.78f + 0.16f * sunVis + lg * 0.3f);
+                        b = b * (1.0f - fluid[3]) + fluid[2] * 255.0f * (0.78f + 0.16f * sunVis + lb * 0.3f);
+                    } else if (mat == MaterialId::Air) {
                         const float sunVis = computeSunShadow(matPtr, x, y, W, H, false);
                         computeAirLightBackdrop(x, y, W, H, sunVis, lr, lg, lb, r, g, b);
                         const float shock = std::clamp((std::abs(pressPtr[i]) - 0.55f) * 0.18f, 0.0f, 0.40f);
@@ -1267,6 +1285,40 @@ void SimWorld::render(ViewMode mode) {
             }
         }
     });
+
+    if (mode == ViewMode::Physical) {
+        // Reconstruct a continuous fluid image without changing simulation cells.
+        const auto source = m_framebuffer;
+        auto medium = [&](int x, int y) {
+            const auto phase = getMaterial(fromIdx(matPtr[y * W + x])).phase;
+            return phase == PhaseState::Liquid || phase == PhaseState::EmptyGas;
+        };
+        m_pool.parallelFor(0, H, [&](int y0, int y1) {
+            for (int y = y0; y < y1; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    if (!medium(x, y)) continue;
+                    float r = 0.0f, g = 0.0f, b = 0.0f, total = 0.0f;
+                    constexpr float weights[] = {1.0f, 4.0f, 6.0f, 4.0f, 1.0f};
+                    for (int dy = -2; dy <= 2; ++dy) {
+                        for (int dx = -2; dx <= 2; ++dx) {
+                            const int sx = x + dx, sy = y + dy;
+                            if (sx < 0 || sy < 0 || sx >= W || sy >= H || !medium(sx, sy)) continue;
+                            const int mx = x + (dx > 0 ? (dx + 1) / 2 : (dx - 1) / 2);
+                            const int my = y + (dy > 0 ? (dy + 1) / 2 : (dy - 1) / 2);
+                            if (!medium(mx, y) || !medium(x, my) || !medium(mx, my)) continue;
+                            const float w = weights[dx + 2] * weights[dy + 2];
+                            const uint32_t c = source[sy * W + sx];
+                            r += static_cast<float>((c >> 16) & 255u) * w;
+                            g += static_cast<float>((c >> 8) & 255u) * w;
+                            b += static_cast<float>(c & 255u) * w;
+                            total += w;
+                        }
+                    }
+                    fbPtr[y * W + x] = packBGRAf(r / total, g / total, b / total);
+                }
+            }
+        });
+    }
 
     const auto t1 = std::chrono::steady_clock::now();
     m_stats.renderMs = std::chrono::duration<double, std::milli>(t1 - t0).count();

@@ -103,6 +103,7 @@ void SimWorld::stepThermoElectric() {
     const uint8_t lavaIdx = toIdx(MaterialId::Lava);
     const uint8_t plasmaIdx = toIdx(MaterialId::Plasma);
     const uint8_t batteryIdx = toIdx(MaterialId::Battery);
+    if (m_continuum) refreshContinuumThermalProperties();
 
     // 1. Symmetric energy-conserving Fourier thermal conduction (2 sub-steps for crisp metal conductivity)
     for (int sub = 0; sub < 2; ++sub) {
@@ -113,6 +114,32 @@ void SimWorld::stepThermoElectric() {
         m_pool.parallelFor(0, H, [&](int y0, int y1) {
             for (int y = y0; y < y1; ++y) {
                 const int row = y * W;
+                if (m_continuum) {
+                    for (int x = 0; x < W; ++x) {
+                        const int i = row + x;
+                        const float Ta = tempIn[i], ca = m_contCapacity[i], ka = m_contConductivity[i];
+                        float flux = 0.0f;
+                        auto edge = [&](int j) {
+                            const float kb = m_contConductivity[j];
+                            const float harmonicK = 2.0f * ka * kb / (ka + kb + 1e-6f);
+                            const float coupling = std::min(0.45f * harmonicK, 0.20f * std::min(ca, m_contCapacity[j]));
+                            flux += coupling * (tempIn[j] - Ta);
+                        };
+                        if (x > 0) edge(i - 1);
+                        if (x + 1 < W) edge(i + 1);
+                        if (y > 0) edge(i - W);
+                        if (y + 1 < H) edge(i + W);
+                        float next = Ta + flux / ca;
+                        if (lastSub) {
+                            if (next > 750.0f && mat[i] != lavaIdx && mat[i] != plasmaIdx)
+                                next -= 0.0022f * (next - 750.0f);
+                            if (openBounds && (x == 0 || y == 0 || x == W - 1 || y == H - 1))
+                                next += 0.12f * (ambT - next);
+                        }
+                        tempOut[i] = std::isfinite(next) ? std::clamp(next, 1.0f, 8000.0f) : Ta;
+                    }
+                    continue;
+                }
                 if (y > 0 && y < H - 1 && !openBounds) {
                     // Fast interior + closed-boundary path: zero y-bounds checks
                     for (int x = 0; x < W; ++x) {
@@ -328,12 +355,9 @@ void SimWorld::stepThermoElectric() {
                 const uint8_t mA = safeMatIdx(mat[i]);
                 const float ecA = kElecCondLUT[mA];
                 if (ecA <= 0.005f) {
-                    const float decayed = charge[i] * 0.65f;
-                    charge[i] = (std::abs(decayed) >= 1e-6f) ? decayed : 0.0f;
                     continue;
                 }
                 if (mA == batteryIdx) {
-                    charge[i] = 4.0f;
                     continue;
                 }
 
@@ -371,12 +395,32 @@ void SimWorld::stepThermoElectric() {
                 jouleHeat += 18.0f * (1.0f - 0.65f * ecA) * dqSelf * dqSelf;
 
                 if (jouleHeat > 0.0005f) {
-                    const float nextT = tempK[i] + jouleHeat / kHeatCapLUT[mA];
+                    const float nextT = tempK[i] + jouleHeat / (m_continuum ? m_contCapacity[i] : kHeatCapLUT[mA]);
                     tempK[i] = std::isfinite(nextT) ? std::clamp(nextT, 1.0f, 8000.0f) : tempK[i];
                 }
 
+            }
+        }
+    });
+
+    // All Joule edge reads must finish before any neighbor potential decays.
+    // Updating charge inside the heat pass races across rows and makes heat
+    // depend on worker scheduling.
+    m_pool.parallelFor(jLoY, jHiY + 1, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            if (rowFlags[y] == 0u) continue;
+            for (int x = 0; x < W; ++x) {
+                const int i = y * W + x;
+                const uint8_t mA = safeMatIdx(mat[i]);
+                if (mA == batteryIdx) continue;
+                const float ecA = kElecCondLUT[mA];
+                if (ecA <= 0.005f) {
+                    const float decayed = charge[i] * 0.65f;
+                    charge[i] = (std::abs(decayed) >= 1e-6f) ? decayed : 0.0f;
+                    continue;
+                }
                 const float decay = (ecA > 0.50f) ? 0.99998f : ((ecA > 0.25f) ? 0.9995f : 0.994f);
-                float qDecayed = qA * decay;
+                float qDecayed = charge[i] * decay;
                 if (mA == plasmaIdx) {
                     qDecayed = std::max(qDecayed, 1.8f);
                 } else if (std::abs(qDecayed) < 1e-6f) {

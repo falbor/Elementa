@@ -45,8 +45,20 @@ inline void traceOpenFluid(int x, int y, float dx, float dy, int W, int H, const
     const float maxYf = static_cast<float>(H - 1);
     const float fx0 = static_cast<float>(x);
     const float fy0 = static_cast<float>(y);
-    const float ex = std::clamp(fx0 + dx, 0.0f, maxXf);
-    const float ey = std::clamp(fy0 + dy, 0.0f, maxYf);
+    float tClip = 1.0f;
+    if (fx0 + dx < 0.0f && dx < -1e-6f) {
+        tClip = std::min(tClip, -fx0 / dx);
+    } else if (fx0 + dx > maxXf && dx > 1e-6f) {
+        tClip = std::min(tClip, (maxXf - fx0) / dx);
+    }
+    if (fy0 + dy < 0.0f && dy < -1e-6f) {
+        tClip = std::min(tClip, -fy0 / dy);
+    } else if (fy0 + dy > maxYf && dy > 1e-6f) {
+        tClip = std::min(tClip, (maxYf - fy0) / dy);
+    }
+    tClip = std::max(0.0f, tClip);
+    const float ex = std::clamp(fx0 + dx * tClip, 0.0f, maxXf);
+    const float ey = std::clamp(fy0 + dy * tClip, 0.0f, maxYf);
     const float rdx = ex - fx0;
     const float rdy = ey - fy0;
 
@@ -135,6 +147,8 @@ void SimWorld::stepFluidField() {
     const float cx = static_cast<float>(W) * 0.5f;
     const float cy = static_cast<float>(H) * 0.5f;
     const uint8_t airIdx = toIdx(MaterialId::Air);
+    const uint8_t steamIdx = toIdx(MaterialId::Steam);
+    const uint8_t methaneIdx = toIdx(MaterialId::Methane);
 
     uint8_t *__restrict mask = m_solidMask.data();
     const uint8_t *__restrict mat = m_mat.data();
@@ -172,7 +186,10 @@ void SimWorld::stepFluidField() {
 
                 if (props.isGasOrEnergy()) {
                     const float dT = std::clamp(temp[i] - ambT, -260.0f, 3500.0f);
-                    const float buoy = 0.00038f * dT;
+                    float buoy = 0.00038f * dT;
+                    if (mat[i] == steamIdx || mat[i] == methaneIdx) {
+                        buoy += 0.016f;
+                    }
                     if (gMode == GravityMode::Earth) {
                         vy -= buoy;
                     } else if (gMode == GravityMode::Inverted) {
@@ -322,7 +339,7 @@ void SimWorld::stepFluidField() {
                     }
                 }
 
-                if (mAny == 0 && mat[i] == airIdx && mat[i00] == airIdx && mat[i10] == airIdx && mat[i01] == airIdx &&
+                if (!m_continuum && mAny == 0 && mat[i] == airIdx && mat[i00] == airIdx && mat[i10] == airIdx && mat[i01] == airIdx &&
                     mat[i11] == airIdx) {
                     const float tAdv = temp[i00] * w00 + temp[i10] * w10 + temp[i01] * w01 + temp[i11] * w11;
                     const float minT = std::min({temp[i00], temp[i10], temp[i01], temp[i11]});
@@ -462,8 +479,8 @@ void SimWorld::stepFluidField() {
     });
 
     // 5. Red-Black SOR Pressure Poisson solver
-    constexpr int kPressureIters = 10;
-    constexpr float kSorOmega = 1.15f;
+    constexpr int kPressureIters = 12;
+    constexpr float kSorOmega = 1.22f;
     for (int iter = 0; iter < kPressureIters; ++iter) {
         for (int color = 0; color < 2; ++color) {
             m_pool.parallelFor(0, H, [&](int y0, int y1) {

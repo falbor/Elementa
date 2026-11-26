@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -742,6 +743,8 @@ constexpr const char *kPass2ShadingPart3Chunk = R"glsl(
 )glsl";
 
 constexpr const char *kPass2MainChunk = R"glsl(
+uniform sampler2D uContinuumTex;
+uniform int uContinuumEnabled;
 void main() {
     vec2 simUv = vec2(vUv.x, 1.0 - vUv.y);
     vec2 simPx = simUv * uSimSize;
@@ -776,6 +779,16 @@ void main() {
         hazeVec = vec2(hx, hy) * hazeAmp;
     }
 
+    if (uContinuumEnabled != 0 && (m.phase == PHASE_GAS || m.phase == PHASE_LIQUID)) {
+        vec4 fluid = texture(uContinuumTex, simUv);
+        vec3 color = fluid.a > 0.000001 ? srgbToLinear(fluid.rgb / fluid.a) : vec3(0.0);
+        vec3 lit = color * (vec3(0.78) + sunColor * (0.16 * sunVis) + localLight * 0.30);
+        vec3 col = atmBg * (1.0 - fluid.a) + lit * fluid.a;
+        if (tempK >= 720.0) col += blackbodyHDR(tempK) * fluid.a * 0.60;
+        fragScene = vec4(col, 1.0);
+        fragRefract = vec4(vec2(128.0 / 255.0), 0.0, 0.0);
+        return;
+    }
     if (matId == MAT_AIR) {
         vec3 col = atmBg + vec3(0.16, 0.32, 0.58) * (shockwave * 0.38);
         if (tempK >= 720.0) col += blackbodyHDR(tempK);
@@ -789,6 +802,17 @@ void main() {
     if (isWispyGasMat(matId)) {
         fragScene = vec4(atmBg, 1.0);
         fragRefract = vec4(clamp(hazeVec * 0.5 + vec2(128.0 / 255.0), 0.0, 1.0), 0.0, 0.55);
+        return;
+    }
+
+    if (m.phase == PHASE_LIQUID) {
+        float depth = computeOpticalDepth24(simUv, matId);
+        float tone = 0.88 + 0.12 * exp(-depth * 0.045);
+        vec3 col = srgbToLinear(m.baseColor) * tone *
+                   (vec3(0.78) + sunColor * (0.16 * sunVis) + localLight * 0.30);
+        if (tempK >= 720.0) col += blackbodyHDR(tempK) * 0.60;
+        fragScene = vec4(col, 1.0);
+        fragRefract = vec4(vec2(128.0 / 255.0), 0.0, 0.0);
         return;
     }
 
@@ -1033,10 +1057,9 @@ constexpr const char *kPass3CompositePart3Chunk = R"glsl(
 
     if (isWispyGasMat(matId)) {
         MatInfo m = fetchMatInfo(uMatLutTex, matId);
-        vec2 drift = simPx * 0.18 - vel * (uTime * 1.4) + vec2(0.0, uTime * 1.6);
-        float wisp = fbm2(drift + vec2(seed01 * 5.0));
-        float detail = fbm2(drift * 2.1 + vec2(4.3, 9.1));
-        float density = clamp((0.28 + 0.72 * lifeNorm) * smoothstep(0.18, 0.82, wisp * 0.7 + detail * 0.3), 0.0, 0.90);
+        vec2 drift = simPx * 0.035 + vec2(uTime * 0.10, uTime * 0.16);
+        float wisp = valueNoise(drift);
+        float density = clamp((0.28 + 0.72 * lifeNorm) * (0.80 + 0.20 * wisp), 0.0, 0.90);
         float baseAlpha = (matId == MAT_SMOKE) ? 0.76 : ((matId == MAT_STEAM) ? 0.58 : 0.34);
         float alpha = clamp(density * baseAlpha, 0.04, 0.86);
 
@@ -1165,6 +1188,36 @@ constexpr const char *kPass5ToneMapFragChunk = R"glsl(
 uniform sampler2D uLitHDRTex;
 uniform sampler2D uBloomTex;
 uniform float uBloomIntensity;
+uniform sampler2D uFluidStateTex;
+uniform sampler2D uFluidMatTex;
+uniform vec2 uFluidTexel;
+
+bool continuousMedium(vec2 uv) {
+    int id = int(floor(texture(uFluidStateTex, vec2(uv.x, 1.0 - uv.y)).r * 255.0 + 0.5));
+    int phase = int(floor((texelFetch(uFluidMatTex, ivec2(id, 0), 0).x + 0.25) / 65536.0));
+    return phase == 0 || phase == 2;
+}
+
+vec3 continuousRadiance() {
+    if (!continuousMedium(vUv)) return texture(uLitHDRTex, vUv).rgb;
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            vec2 offset = vec2(x, y) * uFluidTexel * 0.65;
+            vec2 uv = vUv + offset;
+            // Reject samples crossing solids, powders or energy particles.
+            if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) continue;
+            if (!continuousMedium(uv) || !continuousMedium(vUv + offset * 0.5)) continue;
+            if (!continuousMedium(vUv + vec2(offset.x * 0.5, 0.0)) ||
+                !continuousMedium(vUv + vec2(0.0, offset.y * 0.5))) continue;
+            float w = exp(-float(x*x + y*y) * 0.32);
+            sum += texture(uLitHDRTex, uv).rgb * w;
+            total += w;
+        }
+    }
+    return sum / max(total, 0.001);
+}
 
 float ignDither(vec2 p) {
     vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
@@ -1188,7 +1241,7 @@ vec3 linearToSrgb(vec3 c) {
 }
 
 void main() {
-    vec3 hdr = texture(uLitHDRTex, vUv).rgb;
+    vec3 hdr = continuousRadiance();
     if (uBloomIntensity > 0.001) {
         hdr += texture(uBloomTex, vUv).rgb * (uBloomIntensity * 0.42);
     }
@@ -1498,6 +1551,8 @@ struct GlShaderPipeline::Impl {
 
     // Dynamic SimWorld textures
     GLuint texSimState = 0;
+    GLuint texContinuum = 0;
+    std::vector<float> continuumPackBuf;
     GLuint texSimLight = 0;
     GLuint texSimKinematics = 0;
     int simW = 0;
@@ -1566,6 +1621,8 @@ struct GlShaderPipeline::Impl {
 
     GLuint progScene = 0;
     struct {
+        GLint continuumTex = -1;
+        GLint continuumEnabled = -1;
         GLint simStateTex = -1;
         GLint simLightTex = -1;
         GLint simKinematicsTex = -1;
@@ -1619,6 +1676,9 @@ struct GlShaderPipeline::Impl {
         GLint litHDRTex = -1;
         GLint bloomTex = -1;
         GLint bloomIntensity = -1;
+        GLint fluidStateTex = -1;
+        GLint fluidMatTex = -1;
+        GLint fluidTexel = -1;
     } uToneMap;
 
     void destroyCanvasFbos() noexcept {
@@ -1832,6 +1892,8 @@ struct GlShaderPipeline::Impl {
         uShadowSmooth.shadowsEnabled = gl.GetUniformLocation(progShadowSmooth, "uShadowsEnabled");
 
         uScene.simStateTex = gl.GetUniformLocation(progScene, "uSimStateTex");
+        uScene.continuumTex = gl.GetUniformLocation(progScene, "uContinuumTex");
+        uScene.continuumEnabled = gl.GetUniformLocation(progScene, "uContinuumEnabled");
         uScene.simLightTex = gl.GetUniformLocation(progScene, "uSimLightTex");
         uScene.simKinematicsTex = gl.GetUniformLocation(progScene, "uSimKinematicsTex");
         uScene.matLutTex = gl.GetUniformLocation(progScene, "uMatLutTex");
@@ -1869,6 +1931,9 @@ struct GlShaderPipeline::Impl {
         uToneMap.litHDRTex = gl.GetUniformLocation(progToneMap, "uLitHDRTex");
         uToneMap.bloomTex = gl.GetUniformLocation(progToneMap, "uBloomTex");
         uToneMap.bloomIntensity = gl.GetUniformLocation(progToneMap, "uBloomIntensity");
+        uToneMap.fluidStateTex = gl.GetUniformLocation(progToneMap, "uFluidStateTex");
+        uToneMap.fluidMatTex = gl.GetUniformLocation(progToneMap, "uFluidMatTex");
+        uToneMap.fluidTexel = gl.GetUniformLocation(progToneMap, "uFluidTexel");
     }
 
     bool uploadSimTexturesIfNeeded(const SimWorld &world, bool dataDirty) {
@@ -1975,12 +2040,27 @@ struct GlShaderPipeline::Impl {
             glBindTexture(GL_TEXTURE_2D, texSimKinematics);
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, kinPackBuf.data());
         }
+        continuumPackBuf.resize(n * 4);
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                const auto sample = world.fluidVisualAt(x, y);
+                const size_t offset = static_cast<size_t>(y * W + x) * 4;
+                std::copy(sample.begin(), sample.end(), continuumPackBuf.begin() + offset);
+            }
+        }
+        if (sizeChanged || texContinuum == 0) {
+            if (texContinuum) glDeleteTextures(1, &texContinuum);
+            texContinuum = createTexture2D(W, H, GL_RGBA32F, GL_RGBA, GL_FLOAT, GL_LINEAR, continuumPackBuf.data());
+        } else {
+            glBindTexture(GL_TEXTURE_2D, texContinuum);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RGBA, GL_FLOAT, continuumPackBuf.data());
+        }
         glBindTexture(GL_TEXTURE_2D, 0);
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, prevRowLen);
 
-        if (texSimState == 0 || texSimLight == 0 || texSimKinematics == 0) {
+        if (texSimState == 0 || texSimLight == 0 || texSimKinematics == 0 || texContinuum == 0) {
             return false;
         }
         uploadedTick = tick;
@@ -1989,6 +2069,8 @@ struct GlShaderPipeline::Impl {
     }
 
     void releaseAllGlResources() noexcept {
+        if (texContinuum != 0 && SDL_GL_GetCurrentContext() != nullptr) glDeleteTextures(1, &texContinuum);
+        texContinuum = 0;
         if (SDL_GL_GetCurrentContext() == nullptr) {
             // GL context already destroyed; reset handles safely without invoking driver calls.
             ready = false;
@@ -2135,6 +2217,28 @@ bool GlShaderPipeline::isReady() const noexcept {
     return m_impl && m_impl->ready;
 }
 
+bool GlShaderPipeline::saveOutputPPM(const std::string &path) {
+    if (!m_impl->ready || !m_impl->fboFinal || SDL_GL_GetCurrentContext() == nullptr) return false;
+    ScopedGlState stateGuard(m_impl->gl);
+    const int W = m_impl->canvasW, H = m_impl->canvasH;
+    std::vector<uint8_t> rgb(static_cast<size_t>(W) * H * 3);
+    GLint alignment = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    m_impl->gl.BindFramebuffer(GL_FRAMEBUFFER, m_impl->fboFinal);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+    glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+    if (glGetError() != GL_NO_ERROR) return false;
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    out << "P6\n" << W << ' ' << H << "\n255\n";
+    for (int y = H - 1; y >= 0; --y)
+        out.write(reinterpret_cast<const char *>(rgb.data() + static_cast<size_t>(y) * W * 3), static_cast<std::streamsize>(W) * 3);
+    out.close();
+    return static_cast<bool>(out);
+}
+
 uint64_t GlShaderPipeline::outputTextureId() const noexcept {
     if (!m_impl || !m_impl->ready) return 0;
     return static_cast<uint64_t>(m_impl->texFinal);
@@ -2228,6 +2332,9 @@ bool GlShaderPipeline::render(const SimWorld &world, const GraphicsSettings &set
             gl.Uniform1f(m_impl->uScene.time, timeSec);
             gl.Uniform1f(m_impl->uScene.ambientLight, ambient);
             gl.Uniform1f(m_impl->uScene.sunIntensity, sun);
+            bindTexUnit(gl, 5, m_impl->texContinuum);
+            gl.Uniform1i(m_impl->uScene.continuumTex, 5);
+            gl.Uniform1i(m_impl->uScene.continuumEnabled, world.continuumEnabled() ? 1 : 0);
             glDrawArrays(GL_TRIANGLES, 0, 3);
 
             // --- Pass 3: Optical Refraction, Beer-Lambert, Caustics, Fresnel & Gases ---
@@ -2318,6 +2425,11 @@ bool GlShaderPipeline::render(const SimWorld &world, const GraphicsSettings &set
             gl.Uniform1i(m_impl->uToneMap.litHDRTex, 0);
             gl.Uniform1i(m_impl->uToneMap.bloomTex, 1);
             gl.Uniform1f(m_impl->uToneMap.bloomIntensity, bloomAmt);
+            bindTexUnit(gl, 2, m_impl->texSimState);
+            bindTexUnit(gl, 3, m_impl->texMatLut);
+            gl.Uniform1i(m_impl->uToneMap.fluidStateTex, 2);
+            gl.Uniform1i(m_impl->uToneMap.fluidMatTex, 3);
+            gl.Uniform2f(m_impl->uToneMap.fluidTexel, 1.0f / world.width(), 1.0f / world.height());
             glDrawArrays(GL_TRIANGLES, 0, 3);
         }
     }

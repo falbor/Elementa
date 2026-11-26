@@ -218,10 +218,11 @@ jobs:
           SHORT_SHA: ${{ needs.build-windows-mingw.outputs.short_sha }}
         run: |
           set -euo pipefail
-          gh release delete nightly-latest --yes >/dev/null 2>&1 || true
+          gh release delete nightly-latest -R "${GITHUB_REPOSITORY}" --yes >/dev/null 2>&1 || true
           gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly-latest" >/dev/null 2>&1 || true
           BUILD_DAY=$(date -u +"%Y-%m-%d")
           gh release create nightly-latest release-files/* \
+            -R "${GITHUB_REPOSITORY}" \
             --target "${TARGET_SHA}" \
             --prerelease \
             --title "Elementa Nightly (${BUILD_DAY} / ${SHORT_SHA})" \

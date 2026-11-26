@@ -17,10 +17,20 @@ option(ELEMENTA_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehavior
 option(ELEMENTA_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(ELEMENTA_BUILD_TESTS "Build physics unit tests" ON)
 option(ELEMENTA_BUILD_GUI "Build SDL3 + Dear ImGui + OpenGL3 GUI into pixel_sim" ON)
+option(ELEMENTA_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+option(ELEMENTA_NATIVE_CPU "Tune Release binaries for the build machine CPU" OFF)
+
+if(ELEMENTA_ENABLE_IPO AND NOT ELEMENTA_ENABLE_SANITIZERS)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ELEMENTA_IPO_SUPPORTED OUTPUT ELEMENTA_IPO_ERROR LANGUAGES CXX)
+endif()
 
 find_package(Threads REQUIRED)
 
 function(elementa_configure_target target_name)
+    if(ELEMENTA_IPO_SUPPORTED)
+        set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
     if(MSVC)
         target_compile_options(${target_name} PRIVATE
             /W4
@@ -29,6 +39,9 @@ function(elementa_configure_target target_name)
             $<$<BOOL:${ELEMENTA_WARNINGS_AS_ERRORS}>:/WX>
         )
     else()
+        if(ELEMENTA_NATIVE_CPU)
+            target_compile_options(${target_name} PRIVATE $<$<CONFIG:Release>:-march=native>)
+        endif()
         target_compile_options(${target_name} PRIVATE
             -Wall
             -Wextra
@@ -48,6 +61,11 @@ function(elementa_configure_target target_name)
 endfunction()
 
 add_library(sim_core STATIC
+    src/engine/ContinuumInterface.cpp
+    src/engine/ContinuumTransport.cpp
+    src/engine/ContinuumPressure.cpp
+    src/engine/ContinuumWorld.cpp
+    src/engine/ContinuumMomentum.cpp
     src/engine/Material.cpp
     src/engine/SimWorld.cpp
     src/engine/FluidSolver.cpp
@@ -137,6 +155,7 @@ if(ELEMENTA_BUILD_GUI)
         src/app/SdlApp.cpp
         src/app/GuiOverlay.cpp
         src/app/GlShaderPipeline.cpp
+        src/app/GlMomentum.cpp
     )
 endif()
 
@@ -167,6 +186,26 @@ if(ELEMENTA_BUILD_TESTS)
         target_link_options(pixel_sim_tests PRIVATE -static)
     endif()
     add_test(NAME PixelPhysicsUnitTests COMMAND pixel_sim_tests)
+    add_executable(continuum_tests tests/test_continuum.cpp)
+    target_link_libraries(continuum_tests PRIVATE sim_core)
+    elementa_configure_target(continuum_tests)
+    if(MINGW)
+        target_link_options(continuum_tests PRIVATE -static)
+    endif()
+    add_test(NAME ContinuumTransportTests COMMAND continuum_tests)
+    add_test(NAME ContinuumSurfaceAccuracy COMMAND continuum_tests --accuracy-audit)
+    add_test(NAME ContinuumRotationAccuracy COMMAND continuum_tests --rotation-audit)
+    add_test(NAME ContinuumNormalResolution COMMAND continuum_tests --normal-resolution)
+    set_tests_properties(ContinuumNormalResolution PROPERTIES LABELS extended TIMEOUT 180)
+    add_test(NAME ContinuumCliSmoke COMMAND pixel_sim --continuum --width 32 --height 32 --preset hydro --benchmark 3)
+    add_test(NAME CliDefaultContinuum COMMAND pixel_sim --width 32 --height 32 --benchmark 1)
+    set_tests_properties(CliDefaultContinuum PROPERTIES PASS_REGULAR_EXPRESSION "Continuum:")
+    add_test(NAME CliLegacyFallback COMMAND pixel_sim --legacy-particles --width 32 --height 32 --benchmark 1)
+    set_tests_properties(CliLegacyFallback PROPERTIES FAIL_REGULAR_EXPRESSION "Continuum:")
+    add_test(NAME CliHelp COMMAND pixel_sim --help)
+    add_test(NAME CliRejectConflictingModes COMMAND pixel_sim --benchmark 1 --dump-ppm 0 unused.ppm)
+    add_test(NAME CliRejectInvalidWidth COMMAND pixel_sim --width invalid)
+    set_tests_properties(CliRejectConflictingModes CliRejectInvalidWidth PROPERTIES WILL_FAIL TRUE)
 endif()
 
 install(TARGETS pixel_sim RUNTIME DESTINATION bin)

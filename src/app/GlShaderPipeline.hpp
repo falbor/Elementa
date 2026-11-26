@@ -22,6 +22,7 @@ public:
 
     bool isReady() const noexcept;
     uint64_t outputTextureId() const noexcept;
+    bool saveOutputPPM(const std::string &path);
 
     // Upload dirty simulation fields and execute the multi-pass GL3 shader pipeline.
     // Always finishes with GL_FRAMEBUFFER bound to 0 so ImGui renders cleanly afterward.

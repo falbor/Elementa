@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -34,6 +35,74 @@ void runTest(const char *name, void (*fn)()) {
         std::cerr << "[FAIL] " << name << " -> " << e.what() << "\n";
         ++gFailed;
     }
+}
+
+void testElectricalThreadConsistency() {
+    sim::SimWorld serial(32, 32, 1), parallel(32, 32, 4);
+    for (auto *world : {&serial, &parallel}) {
+        world->setGravityMode(sim::GravityMode::ZeroG);
+        for (int y = 4; y < 28; ++y) {
+            for (int x = 4; x < 28; ++x) {
+                world->setCell(x, y, sim::MaterialId::Metal);
+                world->setCellCharge(x, y, ((x + y) & 1) ? 0.25f : -0.25f);
+            }
+        }
+    }
+    for (int t = 0; t < 5; ++t) { serial.step(); parallel.step(); }
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            const auto a = serial.inspect(x, y), b = parallel.inspect(x, y);
+            CHECK(std::abs(a.tempK - b.tempK) < 1e-4f);
+            CHECK(std::abs(a.charge - b.charge) < 1e-6f);
+        }
+    }
+}
+
+void testRejectNonFiniteInputs() {
+    sim::SimWorld world(24, 24, 1);
+    world.setCell(12, 12, sim::MaterialId::Water);
+    const float initialTemp = world.inspect(12, 12).tempK;
+    world.setCellVelocity(12, 12, 0.5f, -0.5f);
+    for (float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                          std::numeric_limits<float>::infinity(),
+                          -std::numeric_limits<float>::infinity()}) {
+        world.setCellTemp(12, 12, invalid);
+        world.setAmbientTempK(invalid);
+        world.setCellVelocity(12, 12, invalid, 0.0f);
+        world.setCellVelocity(12, 12, 0.0f, invalid);
+        world.setCellCharge(12, 12, invalid);
+        const auto px = world.inspect(12, 12);
+        CHECK(px.tempK == initialTemp);
+        CHECK(px.vx == 0.5f && px.vy == -0.5f);
+        CHECK(px.charge == 0.0f);
+    }
+    world.step();
+    CHECK(std::isfinite(world.computeTotalThermalEnergy()));
+}
+
+void testContinuousFluidRendering() {
+    sim::SimWorld baseline(32, 32, 1);
+    baseline.render(sim::ViewMode::Physical);
+    const uint32_t airColor = baseline.framebuffer()[16 * 32 + 17];
+    for (const auto &material : sim::getAllMaterials()) {
+        if (material.id == sim::MaterialId::Air ||
+            (material.phase != sim::PhaseState::Liquid && material.phase != sim::PhaseState::EmptyGas)) continue;
+        sim::SimWorld world(32, 32, 1);
+        world.setCell(16, 16, material.id);
+        world.render(sim::ViewMode::Physical);
+        // Even an isolated fluid cell contributes a soft halo into nearby air.
+        CHECK(world.framebuffer()[16 * 32 + 17] != airColor);
+        CHECK(world.inspect(17, 16).material == sim::MaterialId::Air);
+        CHECK(world.countMaterial(material.id) == 1);
+    }
+}
+
+void testSnapshotWriteFailure() {
+#if defined(__linux__)
+    // Small images may stay buffered until close: /dev/full rejects the flush.
+    sim::SimWorld world(16, 16, 1);
+    CHECK(!world.savePPM("/dev/full", sim::ViewMode::Physical));
+#endif
 }
 
 void testMaterialConstants() {
@@ -280,8 +349,15 @@ void testBlastPressureAndMomentum() {
     world.setCell(44, 32, sim::MaterialId::Sand);
 
     world.detonate(32, 32, 8, 6.0f, 2200.0f);
-    for (int t = 0; t < 8; ++t)
+    float maxRightWave = 0.0f;
+    float minLeftWave = 0.0f;
+    for (int t = 0; t < 8; ++t) {
         world.step();
+        for (int x = 22; x <= 30; ++x)
+            minLeftWave = std::min(minLeftWave, world.inspect(x, 32).airVx);
+        for (int x = 34; x <= 42; ++x)
+            maxRightWave = std::max(maxRightWave, world.inspect(x, 32).airVx);
+    }
 
     // Explosion creates positive pressure & pushes left sand further left and right sand further right
     CHECK(world.stats().maxPressure > 0.1f);
@@ -295,8 +371,114 @@ void testBlastPressureAndMomentum() {
         }
     }
     CHECK(leftPushed || rightPushed || world.inspect(20, 32).airVx < -0.05f);
-    CHECK(world.inspect(40, 32).airVx > 0.05f);
-    CHECK(world.inspect(24, 32).airVx < -0.05f);
+    // The front travels between cells, so validate its peak radial impulse over
+    // the sampled interval instead of requiring one fixed cell at one tick.
+    CHECK(maxRightWave > 0.05f);
+    CHECK(minLeftWave < -0.05f);
+}
+
+void testSmokeLifecycleAndBuoyancy() {
+    // A fast smoke cloud cannot tunnel through a sealed one-cell wall.
+    sim::SimWorld sealed(48, 48, 2);
+    sealed.setGravityMode(sim::GravityMode::ZeroG);
+    for (int y = 0; y < 48; ++y) sealed.setCell(24, y, sim::MaterialId::Bedrock);
+    for (int y = 18; y <= 25; ++y) {
+        for (int x = 18; x <= 22; ++x) {
+            sealed.setCell(x, y, sim::MaterialId::Smoke);
+            sealed.setCellVelocity(x, y, 3.5f, 0.0f);
+        }
+    }
+    for (int t = 0; t < 100; ++t) sealed.step();
+    CHECK(sealed.countMaterial(sim::MaterialId::Smoke) == 40);
+    for (int y = 0; y < 48; ++y)
+        for (int x = 25; x < 48; ++x)
+            CHECK(sealed.inspect(x, y).material != sim::MaterialId::Smoke);
+
+    sim::SimWorld filled(24, 24, 1);
+    filled.clear(sim::MaterialId::Smoke);
+    filled.step();
+    CHECK(filled.countMaterial(sim::MaterialId::Smoke) > 400);
+    for (int t = 0; t < 360; ++t) filled.step();
+    CHECK(filled.countMaterial(sim::MaterialId::Smoke) == 0);
+
+    for (auto mode : {sim::GravityMode::Earth, sim::GravityMode::Inverted, sim::GravityMode::RadialCenter}) {
+        sim::SimWorld hot(48, 48, 1), cold(48, 48, 1);
+        for (auto *world : {&hot, &cold}) {
+            world->setGravityMode(mode);
+            world->setCell(24, 12, sim::MaterialId::Smoke);
+        }
+        hot.setCellTemp(24, 12, 500.0f);
+        cold.setCellTemp(24, 12, sim::kAmbientTempK);
+        for (int t = 0; t < 5; ++t) { hot.step(); cold.step(); }
+        auto meanY = [](const sim::SimWorld &world) {
+            float sum = 0.0f; int count = 0;
+            for (int y = 0; y < 48; ++y)
+                for (int x = 0; x < 48; ++x)
+                    if (world.inspect(x, y).material == sim::MaterialId::Smoke) { sum += y; ++count; }
+            CHECK(count == 1);
+            return sum / static_cast<float>(count);
+        };
+        const float hotY = meanY(hot), coldY = meanY(cold);
+        CHECK(std::abs(coldY - 12.0f) <= 1.0f);
+        if (mode == sim::GravityMode::Inverted) CHECK(hotY > coldY + 1.0f);
+        else CHECK(hotY < coldY - 1.0f);
+    }
+}
+
+void testLiquidConservationAndInvertedSettling() {
+    for (auto mode : {sim::GravityMode::Earth, sim::GravityMode::Inverted}) {
+        sim::SimWorld world(48, 48, 2);
+        world.setGravityMode(mode);
+        for (int y = 18; y <= 25; ++y)
+            for (int x = 17; x <= 30; ++x)
+                world.setCell(x, y, y < 22 ? sim::MaterialId::Water : sim::MaterialId::Oil);
+        for (int t = 0; t < 200; ++t) world.step();
+        CHECK(world.countMaterial(sim::MaterialId::Water) == 56);
+        CHECK(world.countMaterial(sim::MaterialId::Oil) == 56);
+        float waterY = 0.0f, oilY = 0.0f;
+        for (int y = 0; y < 48; ++y) {
+            for (int x = 0; x < 48; ++x) {
+                const auto px = world.inspect(x, y);
+                CHECK(std::isfinite(px.vx) && std::isfinite(px.vy) && std::isfinite(px.pressure));
+                if (px.material == sim::MaterialId::Water) waterY += y;
+                if (px.material == sim::MaterialId::Oil) oilY += y;
+            }
+        }
+        if (mode == sim::GravityMode::Earth) CHECK(waterY > oilY);
+        else CHECK(waterY < oilY);
+    }
+}
+
+void testGasDensityStratification() {
+    auto buildShaft = [](sim::SimWorld &world) {
+        world.setBoundaryMode(sim::BoundaryMode::Closed);
+        world.setGravityMode(sim::GravityMode::Earth);
+        for (int y = 9; y <= 14; ++y) {
+            world.setCell(19, y, sim::MaterialId::Bedrock);
+            world.setCell(21, y, sim::MaterialId::Bedrock);
+        }
+        world.setCell(20, 10, sim::MaterialId::Bedrock);
+        world.setCell(20, 14, sim::MaterialId::Bedrock);
+    };
+
+    // Methane is lighter than smoke: when trapped below it, methane must swap
+    // upward and leave the denser smoke underneath.
+    sim::SimWorld unstable(40, 32, 1);
+    buildShaft(unstable);
+    unstable.setCell(20, 11, sim::MaterialId::Smoke);
+    unstable.setCell(20, 12, sim::MaterialId::Methane);
+    unstable.step();
+    CHECK(unstable.inspect(20, 11).material == sim::MaterialId::Methane);
+    CHECK(unstable.inspect(20, 12).material == sim::MaterialId::Smoke);
+
+    // The already-stable ordering must not be inverted by the gas update.
+    sim::SimWorld stable(40, 32, 1);
+    buildShaft(stable);
+    stable.setCell(20, 11, sim::MaterialId::Methane);
+    stable.setCell(20, 12, sim::MaterialId::Smoke);
+    stable.step();
+    CHECK(stable.inspect(20, 11).material == sim::MaterialId::Methane);
+    CHECK(stable.inspect(20, 12).material == sim::MaterialId::Smoke);
 }
 
 void testElectricityAndJouleHeating() {
@@ -1500,6 +1682,10 @@ void testLiquidNoTeleportOverOil() {
 } // namespace
 
 int main() {
+    runTest("ContinuousFluidRendering", testContinuousFluidRendering);
+    runTest("SnapshotWriteFailure", testSnapshotWriteFailure);
+    runTest("ElectricalThreadConsistency", testElectricalThreadConsistency);
+    runTest("RejectNonFiniteInputs", testRejectNonFiniteInputs);
     runTest("MaterialConstants", testMaterialConstants);
     runTest("GravityAndNoTunneling", testGravityAndNoTunneling);
     runTest("DensityDisplacement", testDensityDisplacement);
@@ -1507,6 +1693,9 @@ int main() {
     runTest("ThermalConservationAndConductivity", testThermalConservationAndConductivity);
     runTest("PhaseTransitions", testPhaseTransitions);
     runTest("BlastPressureAndMomentum", testBlastPressureAndMomentum);
+    runTest("GasDensityStratification", testGasDensityStratification);
+    runTest("SmokeLifecycleAndBuoyancy", testSmokeLifecycleAndBuoyancy);
+    runTest("LiquidConservationAndInvertedSettling", testLiquidConservationAndInvertedSettling);
     runTest("ElectricityAndJouleHeating", testElectricityAndJouleHeating);
     runTest("ChemistryCombustionAndAcid", testChemistryCombustionAndAcid);
     runTest("ZeroGAndRadialGravity", testZeroGAndRadialGravity);

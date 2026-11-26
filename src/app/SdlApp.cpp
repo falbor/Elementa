@@ -2,6 +2,7 @@
 
 #include "AppState.hpp"
 #include "GlShaderPipeline.hpp"
+#include "GlMomentum.hpp"
 #include "GuiOverlay.hpp"
 
 #ifdef _WIN32
@@ -51,15 +52,18 @@ struct SdlApp::Impl {
 
     void shutdown() {
         cancelActiveInteraction();
+        world.setContinuumMomentumBackend({});
 
         if (window && glContext) {
             SDL_GL_MakeCurrent(window, glContext);
+            glMomentum.shutdown();
             glPipeline.shutdown();
             if (simTexture != 0) {
                 glDeleteTextures(1, &simTexture);
                 simTexture = 0;
             }
         } else {
+            glMomentum.shutdown();
             glPipeline.shutdown();
         }
         state.glShadersAvailable = false;
@@ -717,6 +721,10 @@ struct SdlApp::Impl {
                 cpuTextureDirty = false;
             }
             activeTextureId = static_cast<uint64_t>(simTexture);
+            glBindTexture(GL_TEXTURE_2D, simTexture);
+            const GLint filter = state.viewMode == ViewMode::Physical ? GL_LINEAR : GL_NEAREST;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
             simTextureBottomLeftOrigin = false;
         }
 
@@ -745,6 +753,7 @@ struct SdlApp::Impl {
     AppState state{};
     GuiOverlay overlay;
     GlShaderPipeline glPipeline;
+    GlMomentum glMomentum;
     std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
 
     bool sdlInitialized = false;
@@ -777,7 +786,7 @@ SdlApp::SdlApp(SimWorld &world, ViewMode initialView, PresetId initialPreset)
 
 SdlApp::~SdlApp() = default;
 
-bool SdlApp::create(int windowWidth, int windowHeight) {
+bool SdlApp::create(int windowWidth, int windowHeight, bool gpuMomentum, bool hidden) {
     if (m_impl->window) return true;
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -797,7 +806,8 @@ bool SdlApp::create(int windowWidth, int windowHeight) {
     constexpr SDL_WindowFlags kWindowFlags =
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
     m_impl->window =
-        SDL_CreateWindow("Simulatore Fisico 2D Per-Pixel (C++20)", windowWidth, windowHeight, kWindowFlags);
+        SDL_CreateWindow("Simulatore Fisico 2D Per-Pixel (C++20)", windowWidth, windowHeight,
+                         kWindowFlags | (hidden ? SDL_WINDOW_HIDDEN : 0));
     if (!m_impl->window) {
         std::cerr << "SDL_CreateWindow fallito: " << SDL_GetError() << '\n';
         m_impl->shutdown();
@@ -828,7 +838,7 @@ bool SdlApp::create(int windowWidth, int windowHeight) {
     SDL_SetWindowSize(m_impl->window, w, h);
     SDL_SetWindowMinimumSize(m_impl->window, std::min(uiPx(640), w), std::min(uiPx(480), h));
     SDL_SetWindowPosition(m_impl->window, x, y);
-    SDL_ShowWindow(m_impl->window);
+    if (!hidden) SDL_ShowWindow(m_impl->window);
 
     m_impl->glContext = SDL_GL_CreateContext(m_impl->window);
     if (!m_impl->glContext) {
@@ -880,10 +890,32 @@ bool SdlApp::create(int windowWidth, int windowHeight) {
 
     const bool glReady = m_impl->glPipeline.initialize();
     m_impl->state.glShadersAvailable = glReady && m_impl->glPipeline.isReady();
+    if (gpuMomentum && m_impl->world.continuumEnabled() &&
+        m_impl->glMomentum.initialize(m_impl->world.width(), m_impl->world.height())) {
+        auto *impl = m_impl.get();
+        m_impl->world.setContinuumMomentumBackend([impl](auto u, auto v, auto nu, auto solid, float dt, bool closed) {
+            return impl->glMomentum.advance(u, v, nu, solid, dt, closed);
+        });
+    }
+    std::cerr << "Moto liquidi: " << (gpuMomentumActive() ? "GPU (verifica numerica superata)" : "CPU") << '\n';
+    const auto *renderer = glGetString(GL_RENDERER);
+    const auto *version = glGetString(GL_VERSION);
+    std::cerr << "Rendering: " << (m_impl->state.glShadersAvailable ? "shader OpenGL attivi" : "fallback CPU")
+              << " | Dispositivo: " << (renderer ? reinterpret_cast<const char *>(renderer) : "sconosciuto")
+              << " | OpenGL: " << (version ? reinterpret_cast<const char *>(version) : "sconosciuto") << '\n';
     m_impl->startTime = std::chrono::steady_clock::now();
     m_impl->markSimDirty();
     m_impl->renderAndPresent();
     return true;
+}
+
+bool SdlApp::gpuMomentumActive() const noexcept { return m_impl->glMomentum.isReady(); }
+
+bool SdlApp::saveGpuPPM(const std::string &path) {
+    if (!m_impl->state.glShadersAvailable || !m_impl->glPipeline.isReady()) return false;
+    m_impl->markSimDirty();
+    m_impl->renderAndPresent();
+    return m_impl->glPipeline.saveOutputPPM(path);
 }
 
 int SdlApp::run() {
@@ -892,7 +924,7 @@ int SdlApp::run() {
     using Clock = std::chrono::steady_clock;
     constexpr double kSimTickSec = 1.0 / 60.0;
     constexpr double kMaxFrameDtSec = 0.1;
-    constexpr int kMaxTicksPerFrame = 3;
+    const int kMaxTicksPerFrame = m_impl->world.continuumEnabled() ? 1 : 3;
 
     m_impl->running = true;
     m_impl->simAccumulatorSec = 0.0;

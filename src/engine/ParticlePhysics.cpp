@@ -54,8 +54,14 @@ bool SimWorld::canDisplace(MaterialId mover, MaterialId target) const noexcept {
         return false;
     }
     if (pMover.phase == PhaseState::EmptyGas && mover != MaterialId::Air) {
-        // Rising gas bubbles pass upward through liquids or lighter energy
-        return pTarget.phase == PhaseState::Liquid || target == MaterialId::Fire;
+        // Buoyant gas may rise through liquids and denser gases.  Compare in the
+        // direction of motion: allowing the denser gas to displace the lighter
+        // one here would invert a stable gas column.
+        if (pTarget.phase == PhaseState::Liquid || target == MaterialId::Fire) return true;
+        if (pTarget.phase == PhaseState::EmptyGas) {
+            return pMover.density < pTarget.density * 0.97f;
+        }
+        return false;
     }
     if (pMover.phase == PhaseState::Energy) {
         return pTarget.phase == PhaseState::EmptyGas;
@@ -64,6 +70,7 @@ bool SimWorld::canDisplace(MaterialId mover, MaterialId target) const noexcept {
 }
 
 void SimWorld::moveParticle(int srcIdx, int dstIdx) noexcept {
+    if (m_continuum) m_continuum->swapCells(srcIdx % m_width, srcIdx / m_width, dstIdx % m_width, dstIdx / m_width);
     m_mat[dstIdx] = m_mat[srcIdx];
     m_vx[dstIdx] = m_vx[srcIdx];
     m_vy[dstIdx] = m_vy[srcIdx];
@@ -89,6 +96,7 @@ void SimWorld::moveParticle(int srcIdx, int dstIdx) noexcept {
 }
 
 void SimWorld::swapParticles(int aIdx, int bIdx) noexcept {
+    if (m_continuum) m_continuum->swapCells(aIdx % m_width, aIdx / m_width, bIdx % m_width, bIdx / m_width);
     std::swap(m_mat[aIdx], m_mat[bIdx]);
     std::swap(m_vx[aIdx], m_vx[bIdx]);
     std::swap(m_vy[aIdx], m_vy[bIdx]);
@@ -112,6 +120,7 @@ void SimWorld::updateParticleAt(int x, int y, uint8_t tickParity) {
     if (m_movedTick[curIdx] == tickParity) return;
 
     const MaterialId mat = fromIdx(m_mat[curIdx]);
+    if (m_continuum && ContinuumTransport::isSpecies(mat)) return;
     const auto &props = getMaterial(mat);
     if (!props.isMovable()) return;
     m_movedTick[curIdx] = tickParity;
@@ -122,6 +131,12 @@ void SimWorld::updateParticleAt(int x, int y, uint8_t tickParity) {
     // 1. Compute forces: gravity/buoyancy + aerodynamic drag from Eulerian air field
     float gx = 0.0f, gy = 0.0f;
     computeGravityAt(curX, curY, gx, gy);
+
+    const float gMag = std::sqrt(gx * gx + gy * gy);
+    const float ugx = (gMag > 1e-5f) ? (gx / gMag) : 0.0f;
+    const float ugy = (gMag > 1e-5f) ? (gy / gMag) : 0.0f;
+    const float tgx = -ugy;
+    const float tgy = ugx;
 
     float ax = 0.0f, ay = 0.0f;
     if (props.phase == PhaseState::Powder) {
@@ -136,7 +151,9 @@ void SimWorld::updateParticleAt(int x, int y, uint8_t tickParity) {
         const float dT = m_tempK[curIdx] - m_ambientTempK;
         float buoyScale = -0.30f;
         if (mat == MaterialId::Smoke) {
-            buoyScale = (dT > 15.0f) ? -0.35f : 0.04f;
+            // Fade buoyancy continuously as smoke cools; avoid an abrupt force
+            // reversal at the old 15 K threshold.
+            buoyScale = 0.04f - 0.39f * std::clamp(dT / 60.0f, 0.0f, 1.0f);
         } else if (mat == MaterialId::Steam) {
             buoyScale = -0.45f;
         } else if (mat == MaterialId::Methane) {
@@ -144,12 +161,27 @@ void SimWorld::updateParticleAt(int x, int y, uint8_t tickParity) {
         }
         ax = gx * buoyScale;
         ay = gy * buoyScale;
-        // Gentle Brownian dispersion
-        ax += static_cast<float>(static_cast<int>(rnd % 3u) - 1) * 0.05f;
+        // Brownian dispersion: transverse to gravity when gravity is active, isotropic 2D in ZeroG
+        if (gMag > 1e-5f) {
+            const float jitter = static_cast<float>(static_cast<int>(rnd % 3u) - 1) * 0.05f;
+            ax += tgx * jitter;
+            ay += tgy * jitter;
+        } else {
+            ax += static_cast<float>(static_cast<int>(rnd % 3u) - 1) * 0.07f;
+            ay += static_cast<float>(static_cast<int>((rnd >> 3) % 3u) - 1) * 0.07f;
+        }
     } else if (props.phase == PhaseState::Energy) {
         if (mat == MaterialId::Fire) {
-            ax = -gx * 0.45f + static_cast<float>(static_cast<int>(rnd % 3u) - 1) * 0.09f;
+            ax = -gx * 0.45f;
             ay = -gy * 0.45f;
+            if (gMag > 1e-5f) {
+                const float jitter = static_cast<float>(static_cast<int>(rnd % 3u) - 1) * 0.09f;
+                ax += tgx * jitter;
+                ay += tgy * jitter;
+            } else {
+                ax += static_cast<float>(static_cast<int>(rnd % 3u) - 1) * 0.09f;
+                ay += static_cast<float>(static_cast<int>((rnd >> 3) % 3u) - 1) * 0.09f;
+            }
         } else if (mat == MaterialId::Spark) {
             ax = gx * 0.55f;
             ay = gy * 0.55f;
@@ -162,11 +194,25 @@ void SimWorld::updateParticleAt(int x, int y, uint8_t tickParity) {
     float vx = m_vx[curIdx] + ax;
     float vy = m_vy[curIdx] + ay;
 
-    // Pressure-gradient force (-grad P / rho) from shockwaves & explosive expansion
-    if (curX > 0 && curX < W - 1 && curY > 0 && curY < H - 1) {
-        const float dpx = 0.5f * (m_pressure[curIdx + 1] - m_pressure[curIdx - 1]);
-        const float dpy = 0.5f * (m_pressure[curIdx + W] - m_pressure[curIdx - W]);
-        if (std::abs(dpx) + std::abs(dpy) > 0.30f) {
+    // Pressure-gradient force (-grad P / rho) with Neumann solid-wall protection (no cross-wall leaks)
+    auto samplePressureNeighbor = [&](int nx, int ny) noexcept -> float {
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) {
+            return closed ? m_pressure[curIdx] : 0.0f;
+        }
+        if (closed && (nx == 0 || nx == W - 1 || ny == 0 || ny == H - 1)) {
+            return m_pressure[curIdx];
+        }
+        const int nIdx = ny * W + nx;
+        if (getMaterial(fromIdx(m_mat[nIdx])).isSolidObstacle()) {
+            return m_pressure[curIdx];
+        }
+        return m_pressure[nIdx];
+    };
+    {
+        const float dpx = 0.5f * (samplePressureNeighbor(curX + 1, curY) - samplePressureNeighbor(curX - 1, curY));
+        const float dpy = 0.5f * (samplePressureNeighbor(curX, curY + 1) - samplePressureNeighbor(curX, curY - 1));
+        const float gradThreshold = props.isGasOrEnergy() ? 0.08f : 0.30f;
+        if (std::abs(dpx) + std::abs(dpy) > gradThreshold) {
             const float invRho = 1.0f / std::max(0.45f, props.density);
             vx -= dpx * invRho * 0.45f;
             vy -= dpy * invRho * 0.45f;
@@ -672,7 +718,9 @@ void SimWorld::updateParticleAt(int x, int y, uint8_t tickParity) {
                 m_fy[curIdx] = 0.0f;
             }
         } else if (props.phase == PhaseState::EmptyGas || props.phase == PhaseState::Energy) {
-            if (mat != MaterialId::Spark && (rx != 0 || ry != 0) && tryStepInto(curX - rx, curY - ry, false) != 0)
+            const bool coolSmoke = (mat == MaterialId::Smoke && m_tempK[curIdx] <= m_ambientTempK + 15.0f);
+            if (mat != MaterialId::Spark && !coolSmoke && (rx != 0 || ry != 0) &&
+                tryStepInto(curX - rx, curY - ry, false) != 0)
                 return;
         }
         return;
