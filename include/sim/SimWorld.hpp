@@ -2,6 +2,10 @@
 
 #include "sim/Material.hpp"
 #include "sim/ThreadPool.hpp"
+#include "sim/ContinuumTransport.hpp"
+#include "sim/ContinuumPressure.hpp"
+#include "sim/ContinuumMomentum.hpp"
+#include <memory>
 
 #include <cstdint>
 #include <string>
@@ -82,6 +86,13 @@ struct SimStats {
     double particleMs = 0.0;
     double lightMs = 0.0;
     double renderMs = 0.0;
+    double continuumMomentumMs = 0.0;
+    double continuumPressureMs = 0.0;
+    double continuumTransportMs = 0.0;
+    double continuumViewMs = 0.0;
+    double continuumDivergence = 0.0;
+    int continuumPressureIterations = 0;
+    bool continuumPressureConverged = true;
 };
 
 class SimWorld {
@@ -94,12 +105,37 @@ public:
 
     // Advance physics simulation by exactly 1 tick (dt = 1.0 unit step)
     void step();
+    // Migration path: opt-in until thermal/reaction and rendering adapters are complete.
+    void enableContinuum();
+    bool continuumEnabled() const noexcept { return static_cast<bool>(m_continuum); }
+    void setContinuumMomentumBackend(ContinuumMomentum::Backend backend) {
+        if (m_continuumMomentum) m_continuumMomentum->setBackend(std::move(backend));
+    }
+    double fluidAmount(MaterialId species) const;
+    float fluidAmountAt(MaterialId species, int x, int y) const;
+    std::array<float, 4> fluidVisualAt(int x, int y) const;
+    void setFluidStateAt(MaterialId species, int x, int y, float amount, float temperature);
 
     // Render all W*H pixels into internal BGRA8888 buffer (0xAARRGGBB little-endian BGRA)
     void render(ViewMode mode);
 
-    const uint32_t* framebuffer() const noexcept { return m_framebuffer.data(); }
-    const SimStats& stats() const noexcept { return m_stats; }
+    const uint32_t *framebuffer() const noexcept { return m_framebuffer.data(); }
+    const SimStats &stats() const noexcept { return m_stats; }
+
+    // Read-only raw field accessors for external renderers (zero-copy SOA access)
+    const uint8_t *materialData() const noexcept { return m_mat.data(); }
+    const uint8_t *colorSeedData() const noexcept { return m_colorSeed.data(); }
+    const float *tempData() const noexcept { return m_tempK.data(); }
+    const float *lifeData() const noexcept { return m_life.data(); }
+    const float *chargeData() const noexcept { return m_charge.data(); }
+    const float *pressureData() const noexcept { return m_pressure.data(); }
+    const float *velocityXData() const noexcept { return m_vx.data(); }
+    const float *velocityYData() const noexcept { return m_vy.data(); }
+    const float *airVelocityXData() const noexcept { return m_airVx.data(); }
+    const float *airVelocityYData() const noexcept { return m_airVy.data(); }
+    const float *lightRData() const noexcept { return m_lightR.data(); }
+    const float *lightGData() const noexcept { return m_lightG.data(); }
+    const float *lightBData() const noexcept { return m_lightB.data(); }
 
     // Configuration
     void setGravityMode(GravityMode mode) noexcept { m_gravityMode = mode; }
@@ -108,7 +144,7 @@ public:
     void setBoundaryMode(BoundaryMode mode) noexcept { m_boundaryMode = mode; }
     BoundaryMode boundaryMode() const noexcept { return m_boundaryMode; }
 
-    void setAmbientTempK(float tempK) noexcept { m_ambientTempK = tempK; }
+    void setAmbientTempK(float tempK) noexcept;
     float ambientTempK() const noexcept { return m_ambientTempK; }
 
     // Clear and presets
@@ -131,9 +167,7 @@ public:
     void detonate(int cx, int cy, int radius, float blastStrength, float peakTempK);
 
     // Inspection & counts
-    bool inBounds(int x, int y) const noexcept {
-        return x >= 0 && x < m_width && y >= 0 && y < m_height;
-    }
+    bool inBounds(int x, int y) const noexcept { return x >= 0 && x < m_width && y >= 0 && y < m_height; }
 
     int index(int x, int y) const noexcept { return y * m_width + x; }
 
@@ -142,7 +176,7 @@ public:
     double computeTotalThermalEnergy() const noexcept;
 
     // Export current rendered framebuffer as binary PPM (P6)
-    bool savePPM(const std::string& path, ViewMode mode = ViewMode::Physical);
+    bool savePPM(const std::string &path, ViewMode mode = ViewMode::Physical);
 
 private:
     // Simulation sub-passes (every pixel computed)
@@ -152,6 +186,11 @@ private:
     void stepParticles();
     void stepLighting();
     void computeStats();
+    void stepContinuum();
+    void resetContinuumCell(int idx, MaterialId material);
+    void refreshContinuumProxy(int idx, const std::array<const float *, kMaterialCount> *amounts = nullptr);
+    void refreshContinuumThermalProperties();
+    std::vector<float> m_contCapacity, m_contConductivity;
 
     // Particle kinematics helpers
     void updateParticleAt(int x, int y, uint8_t tickParity);
@@ -159,7 +198,7 @@ private:
     void moveParticle(int srcIdx, int dstIdx) noexcept;
     void swapParticles(int aIdx, int bIdx) noexcept;
     void convertCell(int idx, MaterialId newMat, bool keepTemp = true) noexcept;
-    void computeGravityAt(int x, int y, float& gx, float& gy) const noexcept;
+    void computeGravityAt(int x, int y, float &gx, float &gy) const noexcept;
 
     // Fast deterministic PRNG
     uint32_t nextRand() noexcept;
@@ -215,6 +254,12 @@ private:
     std::vector<uint32_t> m_framebuffer;
 
     SimStats m_stats{};
+    std::unique_ptr<ContinuumTransport> m_continuum;
+    std::unique_ptr<ContinuumPressure> m_continuumPressure;
+    std::unique_ptr<ContinuumMomentum> m_continuumMomentum;
+    std::vector<float> m_contViscosity;
+    std::vector<float> m_contGravityX, m_contGravityY;
+    std::vector<float> m_contU, m_contV, m_contVolume, m_contDensity, m_contSurface;
 };
 
 } // namespace sim

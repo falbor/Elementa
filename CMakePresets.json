@@ -22,6 +22,7 @@
         "rhs": "Windows"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -36,6 +37,7 @@
         "rhs": "Windows"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -50,6 +52,7 @@
         "rhs": "Windows"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl",
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -64,6 +67,7 @@
         "rhs": "Windows"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl",
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -78,6 +82,7 @@
         "rhs": "Linux"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++",
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -92,6 +97,7 @@
         "rhs": "Linux"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -106,6 +112,7 @@
         "rhs": "Linux"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "ELEMENTA_ENABLE_SANITIZERS": "ON"
@@ -121,6 +128,7 @@
         "rhs": "Darwin"
       },
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_BUILD_TYPE": "Release"
       }
